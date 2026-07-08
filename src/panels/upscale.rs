@@ -7,6 +7,7 @@ use crate::pipeline::PipelineJob;
 use crate::settings::{
     Backend, BrightnessPreset, CrushPreset, UpscaleSettings, preset_models_dirs,
 };
+use crate::vs_ops::VsOp;
 
 struct UpscalePreviewTextures {
     orig: egui::TextureHandle,
@@ -637,6 +638,25 @@ impl UpscalePanel {
         }
     }
 
+    /// Launch one of the 5 native VapourSynth deinterlace/telecine ops
+    /// (QTGMC, IVTC, IVTC+Decomb, Field Align, VDecimate) directly — no
+    /// bash wrapper script involved.
+    fn launch_vs_op(&mut self, op: VsOp, input: PathBuf, cfg: &Config, status: &mut String) {
+        let name = input
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("input")
+            .to_string();
+        let label = format!("{} {name}", op.label_verb());
+        match crate::vs_ops::launch(op, &input, cfg, label) {
+            Ok(job) => {
+                *status = format!("Started: {}", job.label);
+                self.pipeline = Some(job);
+            }
+            Err(e) => *status = format!("Failed to start job: {e}"),
+        }
+    }
+
     fn upscale_output(input: &std::path::Path, cfg: &Config) -> PathBuf {
         let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
         let clean = stem.strip_suffix(".viewer").unwrap_or(stem);
@@ -747,39 +767,21 @@ impl UpscalePanel {
                     }
                     FileKind::Stabilized => {
                         if ui.button("QTGMC").clicked() {
-                            self.launch_pipeline(
-                                format!("QTGMC {}", entry.name),
-                                cfg.qtgmc_only_script(),
-                                entry.path.clone(),
-                                &[],
-                                &[],
-                                cfg,
-                                status,
-                            );
+                            self.launch_vs_op(VsOp::Qtgmc, entry.path.clone(), cfg, status);
                         }
                         if ui.button("IVTC").clicked() {
-                            self.launch_pipeline(
-                                format!("IVTC {}", entry.name),
-                                cfg.ivtc_script(),
-                                entry.path.clone(),
-                                &[],
-                                &[],
-                                cfg,
-                                status,
-                            );
+                            self.launch_vs_op(VsOp::Ivtc, entry.path.clone(), cfg, status);
+                        }
+                        if ui.button("IVTC+Decomb").clicked() {
+                            self.launch_vs_op(VsOp::IvtcDecombed, entry.path.clone(), cfg, status);
+                        }
+                        if ui.button("Field Align").clicked() {
+                            self.launch_vs_op(VsOp::FieldAlign, entry.path.clone(), cfg, status);
                         }
                     }
                     FileKind::EditMaster => {
                         if ui.button("VDecimate").clicked() {
-                            self.launch_pipeline(
-                                format!("VDecimate {}", entry.name),
-                                cfg.vdecimate_script(),
-                                entry.path.clone(),
-                                &[],
-                                &[],
-                                cfg,
-                                status,
-                            );
+                            self.launch_vs_op(VsOp::Vdecimate, entry.path.clone(), cfg, status);
                         }
                         if ui.button("Viewer Encode").clicked() {
                             self.launch_pipeline(
