@@ -399,4 +399,40 @@ mod tests {
             String::from_utf8_lossy(&leftover.stdout)
         );
     }
+
+    /// Confirms exit_ok correctly reports failure on a real error (VapourSynth
+    /// choking on a non-video input), rather than the old silent-success
+    /// behavior. Not run by default -- needs real vspipe/ffmpeg.
+    #[test]
+    #[ignore]
+    fn qtgmc_reports_failure_on_bad_input() {
+        let cfg = Config::default();
+        let input = PathBuf::from(
+            "/tmp/claude-1000/-home-ryan-Videos/129570ca-1234-4fe4-8e4c-d071b8ca2f34/scratchpad/vstest/garbage.mkv",
+        );
+        assert!(
+            input.is_file(),
+            "garbage test file missing: {}",
+            input.display()
+        );
+        let out = output_path(VsOp::Qtgmc, &input);
+        let _ = std::fs::remove_file(&out);
+
+        let mut job = launch(VsOp::Qtgmc, &input, &cfg, "smoke-test bad input".into())
+            .expect("launch failed");
+
+        for _ in 0..50 {
+            job.poll();
+            if job.done {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        assert!(job.done, "job did not finish in time");
+        assert_eq!(
+            job.exit_ok,
+            Some(false),
+            "expected ffmpeg to exit non-zero on garbage input"
+        );
+    }
 }

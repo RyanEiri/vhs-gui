@@ -498,7 +498,21 @@ impl UpscalePanel {
                     .map(|msg| format!("{} finished — {msg}", job.label))
                     .unwrap_or_else(|| format!("{} finished", job.label))
             } else {
-                format!("{} finished", job.label)
+                // exit_ok is only meaningful for native jobs (bash jobs never
+                // check exit codes today); a tracked output_path that's
+                // missing is also treated as failure. Untracked (None)
+                // output_path isn't penalized — it was never checked before.
+                let exit_failed = job.exit_ok == Some(false);
+                let output_missing = job
+                    .output_path
+                    .as_deref()
+                    .map(|p| !p.is_file())
+                    .unwrap_or(false);
+                if exit_failed || output_missing {
+                    format!("{} FAILED — see log", job.label)
+                } else {
+                    format!("{} finished", job.label)
+                }
             };
             *status = finish_status;
             self.last_preview_at = None;
@@ -649,9 +663,34 @@ impl UpscalePanel {
             .to_string();
         let label = format!("{} {name}", op.label_verb());
         match crate::vs_ops::launch(op, &input, cfg, label) {
-            Ok(job) => {
+            Ok(mut job) => {
+                job.output_path = Some(crate::vs_ops::output_path(op, &input));
                 *status = format!("Started: {}", job.label);
                 self.pipeline = Some(job);
+            }
+            Err(e) => *status = format!("Failed to start job: {e}"),
+        }
+    }
+
+    /// Launch native A/V drift correction (`fix_sync`). Output is written
+    /// beside the input as `<stem>_SYNC.mkv`.
+    fn launch_fix_sync(&mut self, input: PathBuf, cfg: &Config, status: &mut String) {
+        let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
+        let dir = input.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let output = dir.join(format!("{stem}_SYNC.mkv"));
+        let name = input
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("input")
+            .to_string();
+        match crate::fix_sync::launch(&input, &output, cfg, format!("Fix A/V Sync {name}")) {
+            Ok(Some(mut job)) => {
+                job.output_path = Some(output);
+                *status = format!("Started: {}", job.label);
+                self.pipeline = Some(job);
+            }
+            Ok(None) => {
+                *status = "No correction needed (drift < 0.001%)".to_string();
             }
             Err(e) => *status = format!("Failed to start job: {e}"),
         }
@@ -778,10 +817,16 @@ impl UpscalePanel {
                         if ui.button("Field Align").clicked() {
                             self.launch_vs_op(VsOp::FieldAlign, entry.path.clone(), cfg, status);
                         }
+                        if ui.button("Fix A/V Sync").clicked() {
+                            self.launch_fix_sync(entry.path.clone(), cfg, status);
+                        }
                     }
                     FileKind::EditMaster => {
                         if ui.button("VDecimate").clicked() {
                             self.launch_vs_op(VsOp::Vdecimate, entry.path.clone(), cfg, status);
+                        }
+                        if ui.button("Fix A/V Sync").clicked() {
+                            self.launch_fix_sync(entry.path.clone(), cfg, status);
                         }
                         if ui.button("Viewer Encode").clicked() {
                             self.launch_pipeline(

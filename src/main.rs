@@ -1,6 +1,7 @@
 mod app;
 mod capture;
 mod config;
+mod fix_sync;
 mod library;
 mod mpv_view;
 mod panels;
