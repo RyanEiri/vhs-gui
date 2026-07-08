@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=VHS GUI
+Comment=VHS digitization pipeline
+Exec=/usr/local/bin/vhs-gui
+Icon=vhs-gui
+Type=Application
+Categories=AudioVideo;Video;
+StartupWMClass=vhs-gui
