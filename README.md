@@ -32,10 +32,30 @@ Built and run on a single Linux workstation:
   jobs via either backend (ROCm/PyTorch or Vulkan/ncnn; see the Upscale Settings
   panel). ROCm is required for the community VHS-specific models — the Vulkan
   binary segfaults on any model name outside its hardcoded family list.
-- **VHS capture device:** MacroSilicon MS210x USB video grabber ("EasierCAP"-type
-  dongle) — opened via V4L2 at a stable `/dev/v4l/by-id/...` path so it survives
-  USB port changes. `src/config.rs`'s `v4l2_device` default targets this device
-  specifically; override it for different capture hardware.
+- **VHS capture device (the flakiest link in the pipeline):** MacroSilicon
+  MS210x USB video grabber — a low-cost USB2.0 analog capture dongle
+  ("EasierCAP"-type). Opened via V4L2 at a stable `/dev/v4l/by-id/...` path
+  (`src/config.rs`'s `v4l2_device` default) so it survives USB port changes;
+  override it for different capture hardware. A fair amount of this app's
+  capture-side code exists specifically to work around this device's quirks:
+  - **Exclusive access.** Only one process can hold its V4L2 fd at a time, so
+    handing off from the live Monitor preview (mpv) to a capture (ffmpeg)
+    can't just start the second process — mpv's hold has to actually clear
+    first. That's the `Releasing` capture state (1s timeout,
+    `src/panels/monitor.rs`) between Monitoring and Capturing.
+  - **Spurious preview drops.** The live-preview stream sometimes goes idle
+    on its own mid-capture even though ffmpeg is still recording correctly
+    in the background. Rather than surface that as an error, an "insurance
+    reopen" (throttled to once per 2s, `src/panels/monitor.rs`)
+    automatically reconnects mpv to the preview stream.
+  - **Slow USB control transfers.** Setting brightness/contrast/hue/etc. via
+    `VIDIOC_S_CTRL` can block for multiple seconds on this device. `src/
+    v4l2.rs` issues every control write from a dedicated background thread
+    over a bounded channel specifically so a slow ioctl never freezes the
+    UI thread — see the comment above the thread spawn there.
+  - Video and audio are two independent USB interfaces on the same dongle,
+    not a hardware-synced A/V pair — they drift over a long capture. Native
+    "Fix A/V Sync" corrects this after the fact.
 - **Upscale scratch storage:** a secondary drive mounted at
   `/media/ryan/Patriot/Videos/vhs_upscale_work/` — segment checkpoints for
   chunked/resumable upscale jobs live there by default.
