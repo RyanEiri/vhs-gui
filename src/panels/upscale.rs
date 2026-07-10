@@ -493,6 +493,11 @@ impl UpscalePanel {
         }
 
         if job.done {
+            // Captured before the job (and its output_path) is dropped below,
+            // so the newly-produced file can stay selected after refresh()
+            // resets the index — otherwise the action panel (and its Rename
+            // button) vanishes and the user has to re-click the row.
+            let reselect_path = job.output_path.clone();
             let finish_status = if job.is_upscale {
                 cleanup_upscale_work_dir(&job.output_path, &job.segments_dir)
                     .map(|msg| format!("{} finished — {msg}", job.label))
@@ -520,6 +525,9 @@ impl UpscalePanel {
             self.preview_textures = None;
             self.pipeline = None;
             self.library.refresh(cfg);
+            if let Some(p) = reselect_path {
+                self.library.selected = self.library.entries.iter().position(|e| e.path == p);
+            }
         }
     }
 
@@ -1013,6 +1021,12 @@ impl UpscalePanel {
                             Ok(()) => {
                                 *status = format!("Renamed to {new_name}");
                                 self.library.refresh(cfg);
+                                // Keep the renamed file selected so the action
+                                // panel (and Rename button) doesn't disappear —
+                                // otherwise a second rename requires re-clicking
+                                // the row first.
+                                self.library.selected =
+                                    self.library.entries.iter().position(|e| e.path == new_path);
                             }
                             Err(e) => *status = format!("Rename failed: {e}"),
                         }
@@ -1186,6 +1200,9 @@ fn suggest_viewer_name(path: &std::path::Path) -> String {
     let stem = stem.strip_suffix(".viewer").unwrap_or(stem);
     let stem = stem.strip_suffix("_VD").unwrap_or(stem);
     let stem = stem.strip_prefix("EDIT_MASTER-").unwrap_or(stem);
+    if stem.is_empty() {
+        return name.to_owned();
+    }
     if let Some(dash) = stem.find('-') {
         let type_part = &stem[..dash];
         let title_part = &stem[dash + 1..];
@@ -1197,5 +1214,44 @@ fn suggest_viewer_name(path: &std::path::Path) -> String {
             );
         }
     }
-    name.to_owned()
+    // No type/title dash to split on (e.g. a tape whose title itself has no
+    // internal "-", so it's not "TYPE-TITLE") — still title-case the whole
+    // stem instead of falling back to the untouched original name, which
+    // would silently offer the current filename as its own "suggestion" and
+    // make a same-name rename fail with a false "already exists".
+    format!("{}.mkv", title_words(stem))
+}
+
+#[cfg(test)]
+mod suggest_viewer_name_tests {
+    use super::suggest_viewer_name;
+    use std::path::Path;
+
+    #[test]
+    fn tagged_name_with_type_title_dash_is_humanized() {
+        let p = Path::new("EDIT_MASTER-VHS_TRAILER-THE_GREAT_MOUSE_DETECTIVE_VD.upscale.mkv");
+        assert_eq!(
+            suggest_viewer_name(p),
+            "VHS Trailer — The Great Mouse Detective.mkv"
+        );
+    }
+
+    /// Regression test: a tape title with no internal "-" (not a
+    /// "TYPE-TITLE" pattern) previously fell back to the untouched original
+    /// filename as its own "suggestion" — if that file was already
+    /// untagged, the suggestion was byte-identical to the current name, so
+    /// accepting it without editing failed with a false "already exists".
+    #[test]
+    fn dashless_untagged_name_is_still_title_cased_and_differs_from_input() {
+        let p = Path::new("TED_BARYLUKS_GROCERY.mkv");
+        let suggestion = suggest_viewer_name(p);
+        assert_eq!(suggestion, "Ted Baryluks Grocery.mkv");
+        assert_ne!(suggestion, "TED_BARYLUKS_GROCERY.mkv");
+    }
+
+    #[test]
+    fn dashless_tagged_name_strips_tags_and_title_cases() {
+        let p = Path::new("EDIT_MASTER-TED_BARYLUKS_GROCERY_VD.upscale.mkv");
+        assert_eq!(suggest_viewer_name(p), "Ted Baryluks Grocery.mkv");
+    }
 }
