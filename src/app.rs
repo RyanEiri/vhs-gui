@@ -344,6 +344,22 @@ impl eframe::App for App {
             }
         });
     }
+
+    /// Called once on shutdown (window close, Cmd/Ctrl+Q, etc.). Without this,
+    /// a running job's child processes (ffmpeg, vspipe, the ROCm/Vulkan
+    /// upscale driver, or an in-progress capture) are left running after the
+    /// GUI exits — they're in their own process group so nothing reaps them.
+    /// SIGINT (not SIGKILL) matches the existing Cancel/Stop behavior: ffmpeg
+    /// finalizes its output cleanly and upscale checkpoint segments already
+    /// on disk stay valid for a later resume.
+    fn on_exit(&mut self, _gl: Option<&glow::Context>) {
+        if let Some(job) = self.upscale.pipeline_job() {
+            job.cancel();
+        }
+        if self.monitor.capture.is_running() {
+            self.monitor.capture.stop();
+        }
+    }
 }
 
 fn format_time(secs: f64) -> String {
