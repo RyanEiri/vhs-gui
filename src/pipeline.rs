@@ -4,8 +4,22 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Instant, SystemTime};
 
+use nix::unistd::Pid;
+
 pub struct PipelineJob {
     child: Option<Child>,
+    /// The producer process (`vspipe`) in a two-process native pipe.  `child`
+    /// holds the consumer (`ffmpeg`), whose stderr drives progress parsing.
+    /// `None` for bash jobs and single-process native jobs.
+    aux_child: Option<Child>,
+    /// Process-group id to signal.  Bash jobs: `child`'s pid (unchanged
+    /// behavior — `.process_group(0)` made child pid == pgid).  Native pipe
+    /// jobs: the producer's pid (the group leader the consumer joined).
+    /// Native single jobs: the one child's pid.
+    pub(crate) pgid: Pid,
+    /// Set once the job's primary process exits: `Some(true)` on a clean exit,
+    /// `Some(false)` on a non-zero exit.  `None` while still running.
+    pub exit_ok: Option<bool>,
     /// Human-readable label shown in the UI (e.g. "VDecimate seg001.mkv")
     pub label: String,
     /// True once the child has exited (success or failure).
@@ -49,6 +63,100 @@ pub struct PipelineJob {
     stop_after_segment_at: Option<u64>,
 }
 
+/// Shared preamble for every spawn path: probes the input, builds the log
+/// file, and computes the `~/bin`-shimmed PATH.  Returns everything each
+/// constructor needs to build its own `Command`(s) and the base `Self`.
+struct SpawnPrep {
+    label_str: String,
+    total_frames: u64,
+    total_duration_secs: f64,
+    log_path: PathBuf,
+    log_file: fs::File,
+    full_path: String,
+}
+
+fn prepare_spawn(
+    label: impl Into<String>,
+    input: &Path,
+    log_dir: &Path,
+) -> anyhow::Result<SpawnPrep> {
+    // Probe input video info before spawning (fast: reads container header).
+    let (total_frames, total_duration_secs) = probe_video_info(input);
+
+    let label_str: String = label.into();
+
+    // Create a log file for this job; redirect both stdout and stderr there.
+    // Stdout captures script-level status/error messages; stderr captures
+    // ffmpeg progress lines (frame=, time=) that we tail for the progress bar.
+    let slug: String = label_str
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(40)
+        .collect();
+    let ts = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let log_path = log_dir.join(format!("{slug}_{ts}.log"));
+    let log_file = fs::File::create(&log_path)?;
+
+    // Ensure ~/bin is on PATH so user-installed tools (realesrgan-rocm, etc.)
+    // are findable even when the GUI is launched from a desktop session that
+    // doesn't run the user's full shell profile.
+    let home = std::env::var("HOME").unwrap_or_default();
+    let home_bin = format!("{home}/bin");
+    let current_path = std::env::var("PATH").unwrap_or_default();
+    let full_path = if current_path.split(':').any(|p| p == home_bin) {
+        current_path
+    } else {
+        format!("{home_bin}:{current_path}")
+    };
+
+    Ok(SpawnPrep {
+        label_str,
+        total_frames,
+        total_duration_secs,
+        log_path,
+        log_file,
+        full_path,
+    })
+}
+
+/// Base fields shared by every constructor, given the pieces that differ.
+fn base_job(prep: SpawnPrep, child: Child, aux_child: Option<Child>, pgid: Pid) -> PipelineJob {
+    PipelineJob {
+        child: Some(child),
+        aux_child,
+        pgid,
+        exit_ok: None,
+        label: prep.label_str,
+        done: false,
+        current_frame: 0,
+        total_frames: prep.total_frames,
+        current_time_secs: 0.0,
+        total_duration_secs: prep.total_duration_secs,
+        script_log: Some(prep.log_path),
+        started_at: Instant::now(),
+        is_upscale: false,
+        segments_dir: None,
+        frames_dir: None,
+        frames_up_dir: None,
+        completed_segments: 0,
+        total_segments: 0,
+        upscaled_frames: 0,
+        segment_frames: 0,
+        output_path: None,
+        paused: false,
+        stop_after_segment_at: None,
+    }
+}
+
 impl PipelineJob {
     /// Spawn a pipeline script.
     ///
@@ -67,47 +175,11 @@ impl PipelineJob {
     ) -> anyhow::Result<Self> {
         use std::os::unix::process::CommandExt as _;
 
-        // Probe input video info before spawning (fast: reads container header).
-        let (total_frames, total_duration_secs) = probe_video_info(input);
-
-        let label_str: String = label.into();
-
-        // Create a log file for this job; redirect both stdout and stderr there.
-        // Stdout captures script-level status/error messages; stderr captures
-        // ffmpeg progress lines (frame=, time=) that we tail for the progress bar.
-        let slug: String = label_str
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '-' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .take(40)
-            .collect();
-        let ts = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let log_path = log_dir.join(format!("{slug}_{ts}.log"));
-        let log_file = fs::File::create(&log_path)?;
+        let prep = prepare_spawn(label, input, log_dir)?;
         // Clone handle so both stdout and stderr land in the same log file.
         // This captures script-level error messages (which often go to stdout)
         // as well as ffmpeg progress lines (which go to stderr).
-        let log_file_out = log_file.try_clone()?;
-
-        // Ensure ~/bin is on PATH so user-installed tools (realesrgan-rocm, etc.)
-        // are findable even when the GUI is launched from a desktop session that
-        // doesn't run the user's full shell profile.
-        let home = std::env::var("HOME").unwrap_or_default();
-        let home_bin = format!("{home}/bin");
-        let current_path = std::env::var("PATH").unwrap_or_default();
-        let full_path = if current_path.split(':').any(|p| p == home_bin) {
-            current_path
-        } else {
-            format!("{home_bin}:{current_path}")
-        };
+        let log_file_out = prep.log_file.try_clone()?;
 
         let mut cmd = Command::new("bash");
         cmd.arg(script).arg(input);
@@ -117,8 +189,8 @@ impl PipelineJob {
         cmd.stdin(Stdio::null())
             // Both stdout and stderr go to the log so we see all script output.
             .stdout(Stdio::from(log_file_out))
-            .stderr(Stdio::from(log_file))
-            .env("PATH", full_path)
+            .stderr(Stdio::from(prep.log_file.try_clone()?))
+            .env("PATH", &prep.full_path)
             .process_group(0); // own PGID so killpg() doesn't reach vhs-gui
 
         for (k, v) in envs {
@@ -126,28 +198,73 @@ impl PipelineJob {
         }
 
         let child = cmd.spawn()?;
-        Ok(Self {
-            child: Some(child),
-            label: label_str,
-            done: false,
-            current_frame: 0,
-            total_frames,
-            current_time_secs: 0.0,
-            total_duration_secs,
-            script_log: Some(log_path),
-            started_at: Instant::now(),
-            is_upscale: false,
-            segments_dir: None,
-            frames_dir: None,
-            frames_up_dir: None,
-            completed_segments: 0,
-            total_segments: 0,
-            upscaled_frames: 0,
-            segment_frames: 0,
-            output_path: None,
-            paused: false,
-            stop_after_segment_at: None,
-        })
+        let pgid = Pid::from_raw(child.id() as i32);
+        Ok(base_job(prep, child, None, pgid))
+    }
+
+    /// Spawn a native two-process pipe: `producer | consumer` (e.g. `vspipe |
+    /// ffmpeg`). `producer`/`consumer` must already have their args/env set;
+    /// this function wires stdio (piped stdout -> stdin), the shared process
+    /// group, and log redirection. The consumer's stderr drives progress
+    /// parsing (same as the bash path).
+    pub fn start_native_pipe(
+        label: impl Into<String>,
+        input: &Path,
+        mut producer: Command,
+        mut consumer: Command,
+        log_dir: &Path,
+    ) -> anyhow::Result<Self> {
+        use std::os::unix::process::CommandExt as _;
+
+        let prep = prepare_spawn(label, input, log_dir)?;
+
+        producer
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::from(prep.log_file.try_clone()?))
+            .env("PATH", &prep.full_path)
+            .process_group(0); // producer becomes its own group leader
+
+        let mut producer_child = producer.spawn()?;
+        let producer_pid = producer_child.id();
+        let producer_stdout = producer_child
+            .stdout
+            .take()
+            .expect("producer spawned with Stdio::piped()");
+
+        consumer
+            .stdin(Stdio::from(producer_stdout))
+            .stdout(Stdio::from(prep.log_file.try_clone()?))
+            .stderr(Stdio::from(prep.log_file.try_clone()?))
+            .env("PATH", &prep.full_path)
+            .process_group(producer_pid as i32); // join the producer's group
+
+        let consumer_child = consumer.spawn()?;
+        let pgid = Pid::from_raw(producer_pid as i32);
+        Ok(base_job(prep, consumer_child, Some(producer_child), pgid))
+    }
+
+    /// Spawn a single native process (no pipe) — e.g. the one-shot `ffmpeg`
+    /// call used by A/V sync correction.
+    pub fn start_native_single(
+        label: impl Into<String>,
+        input: &Path,
+        mut cmd: Command,
+        log_dir: &Path,
+    ) -> anyhow::Result<Self> {
+        use std::os::unix::process::CommandExt as _;
+
+        let prep = prepare_spawn(label, input, log_dir)?;
+
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::from(prep.log_file.try_clone()?))
+            .stderr(Stdio::from(prep.log_file.try_clone()?))
+            .env("PATH", &prep.full_path)
+            .process_group(0);
+
+        let child = cmd.spawn()?;
+        let pgid = Pid::from_raw(child.id() as i32);
+        Ok(base_job(prep, child, None, pgid))
     }
 
     /// Non-blocking poll: check child exit and tail the script's own log for
@@ -175,14 +292,32 @@ impl PipelineJob {
 
         if let Some(ref mut child) = self.child {
             match child.try_wait() {
-                Ok(Some(_)) | Err(_) => {
+                Ok(Some(status)) => {
+                    self.exit_ok = Some(status.success());
                     self.child = None;
                     self.done = true;
+                    self.reap_aux_child();
+                }
+                Err(_) => {
+                    self.exit_ok = Some(false);
+                    self.child = None;
+                    self.done = true;
+                    self.reap_aux_child();
                 }
                 Ok(None) => {}
             }
         } else {
             self.done = true;
+        }
+    }
+
+    /// Kill (idempotent — a no-op if it already exited, e.g. from SIGPIPE when
+    /// the consumer closed its stdin) and reap the producer side of a native
+    /// pipe job, so it never becomes a zombie.
+    fn reap_aux_child(&mut self) {
+        if let Some(mut aux) = self.aux_child.take() {
+            let _ = aux.kill();
+            let _ = aux.wait();
         }
     }
 
@@ -256,29 +391,27 @@ impl PipelineJob {
         Some((self.completed_segments as f32 / self.total_segments as f32).min(1.0))
     }
 
-    /// Send SIGINT to the child's process group.
-    /// Safe because `.process_group(0)` makes child PGID == child PID.
+    /// Send SIGINT to the job's process group.
+    /// Safe because every constructor sets `pgid` to the actual group leader
+    /// (child pid for bash/single jobs, producer pid for native pipe jobs).
     pub fn cancel(&self) {
-        if let Some(ref child) = self.child {
+        if self.child.is_some() {
             use nix::sys::signal::{Signal, killpg};
-            use nix::unistd::Pid;
-            let _ = killpg(Pid::from_raw(child.id() as i32), Signal::SIGINT);
+            let _ = killpg(self.pgid, Signal::SIGINT);
         }
     }
 
     /// Toggle SIGSTOP / SIGCONT on the entire process group.
-    /// All child processes (realesrgan-rocm, ffmpeg) inherit the PGID from bash
-    /// and are paused / resumed together.
+    /// All processes in the group (bash's children, or the native
+    /// producer+consumer pair) are paused / resumed together.
     pub fn toggle_pause(&mut self) {
         use nix::sys::signal::{Signal, killpg};
-        use nix::unistd::Pid;
-        if let Some(ref child) = self.child {
-            let pgid = Pid::from_raw(child.id() as i32);
+        if self.child.is_some() {
             if self.paused {
-                let _ = killpg(pgid, Signal::SIGCONT);
+                let _ = killpg(self.pgid, Signal::SIGCONT);
                 self.paused = false;
             } else {
-                let _ = killpg(pgid, Signal::SIGSTOP);
+                let _ = killpg(self.pgid, Signal::SIGSTOP);
                 self.paused = true;
             }
         }

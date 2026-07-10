@@ -1,6 +1,7 @@
 mod app;
 mod capture;
 mod config;
+mod fix_sync;
 mod library;
 mod mpv_view;
 mod panels;
@@ -8,6 +9,7 @@ mod persist;
 mod pipeline;
 mod settings;
 mod v4l2;
+mod vs_ops;
 
 /// Decode the embedded icon PNG and return `egui::IconData`.
 /// Returns `None` on any decode error so startup isn't blocked.

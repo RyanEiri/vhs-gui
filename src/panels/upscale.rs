@@ -7,6 +7,7 @@ use crate::pipeline::PipelineJob;
 use crate::settings::{
     Backend, BrightnessPreset, CrushPreset, UpscaleSettings, preset_models_dirs,
 };
+use crate::vs_ops::VsOp;
 
 struct UpscalePreviewTextures {
     orig: egui::TextureHandle,
@@ -492,12 +493,31 @@ impl UpscalePanel {
         }
 
         if job.done {
+            // Captured before the job (and its output_path) is dropped below,
+            // so the newly-produced file can stay selected after refresh()
+            // resets the index — otherwise the action panel (and its Rename
+            // button) vanishes and the user has to re-click the row.
+            let reselect_path = job.output_path.clone();
             let finish_status = if job.is_upscale {
                 cleanup_upscale_work_dir(&job.output_path, &job.segments_dir)
                     .map(|msg| format!("{} finished — {msg}", job.label))
                     .unwrap_or_else(|| format!("{} finished", job.label))
             } else {
-                format!("{} finished", job.label)
+                // exit_ok is only meaningful for native jobs (bash jobs never
+                // check exit codes today); a tracked output_path that's
+                // missing is also treated as failure. Untracked (None)
+                // output_path isn't penalized — it was never checked before.
+                let exit_failed = job.exit_ok == Some(false);
+                let output_missing = job
+                    .output_path
+                    .as_deref()
+                    .map(|p| !p.is_file())
+                    .unwrap_or(false);
+                if exit_failed || output_missing {
+                    format!("{} FAILED — see log", job.label)
+                } else {
+                    format!("{} finished", job.label)
+                }
             };
             *status = finish_status;
             self.last_preview_at = None;
@@ -505,6 +525,9 @@ impl UpscalePanel {
             self.preview_textures = None;
             self.pipeline = None;
             self.library.refresh(cfg);
+            if let Some(p) = reselect_path {
+                self.library.selected = self.library.entries.iter().position(|e| e.path == p);
+            }
         }
     }
 
@@ -597,7 +620,16 @@ impl UpscalePanel {
                 ui.add_space(gap);
                 ui.vertical(|ui| {
                     ui.set_max_width(panel_w);
-                    ui.label(egui::RichText::new("Upscaled  4×").small().weak());
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Upscaled  {}×",
+                                self.settings.internal_scale
+                            ))
+                            .small()
+                            .weak(),
+                        );
+                    });
                     ui.add(
                         egui::Image::new(egui::load::SizedTexture::from_handle(&textures.upscaled))
                             .fit_to_exact_size(egui::vec2(panel_w, panel_h)),
@@ -632,6 +664,50 @@ impl UpscalePanel {
             Ok(job) => {
                 *status = format!("Started: {}", job.label);
                 self.pipeline = Some(job);
+            }
+            Err(e) => *status = format!("Failed to start job: {e}"),
+        }
+    }
+
+    /// Launch one of the 5 native VapourSynth deinterlace/telecine ops
+    /// (QTGMC, IVTC, IVTC+Decomb, Field Align, VDecimate) directly — no
+    /// bash wrapper script involved.
+    fn launch_vs_op(&mut self, op: VsOp, input: PathBuf, cfg: &Config, status: &mut String) {
+        let name = input
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("input")
+            .to_string();
+        let label = format!("{} {name}", op.label_verb());
+        match crate::vs_ops::launch(op, &input, cfg, label) {
+            Ok(mut job) => {
+                job.output_path = Some(crate::vs_ops::output_path(op, &input));
+                *status = format!("Started: {}", job.label);
+                self.pipeline = Some(job);
+            }
+            Err(e) => *status = format!("Failed to start job: {e}"),
+        }
+    }
+
+    /// Launch native A/V drift correction (`fix_sync`). Output is written
+    /// beside the input as `<stem>_SYNC.mkv`.
+    fn launch_fix_sync(&mut self, input: PathBuf, cfg: &Config, status: &mut String) {
+        let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
+        let dir = input.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let output = dir.join(format!("{stem}_SYNC.mkv"));
+        let name = input
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("input")
+            .to_string();
+        match crate::fix_sync::launch(&input, &output, cfg, format!("Fix A/V Sync {name}")) {
+            Ok(Some(mut job)) => {
+                job.output_path = Some(output);
+                *status = format!("Started: {}", job.label);
+                self.pipeline = Some(job);
+            }
+            Ok(None) => {
+                *status = "No correction needed (drift < 0.001%)".to_string();
             }
             Err(e) => *status = format!("Failed to start job: {e}"),
         }
@@ -747,39 +823,27 @@ impl UpscalePanel {
                     }
                     FileKind::Stabilized => {
                         if ui.button("QTGMC").clicked() {
-                            self.launch_pipeline(
-                                format!("QTGMC {}", entry.name),
-                                cfg.qtgmc_only_script(),
-                                entry.path.clone(),
-                                &[],
-                                &[],
-                                cfg,
-                                status,
-                            );
+                            self.launch_vs_op(VsOp::Qtgmc, entry.path.clone(), cfg, status);
                         }
                         if ui.button("IVTC").clicked() {
-                            self.launch_pipeline(
-                                format!("IVTC {}", entry.name),
-                                cfg.ivtc_script(),
-                                entry.path.clone(),
-                                &[],
-                                &[],
-                                cfg,
-                                status,
-                            );
+                            self.launch_vs_op(VsOp::Ivtc, entry.path.clone(), cfg, status);
+                        }
+                        if ui.button("IVTC+Decomb").clicked() {
+                            self.launch_vs_op(VsOp::IvtcDecombed, entry.path.clone(), cfg, status);
+                        }
+                        if ui.button("Field Align").clicked() {
+                            self.launch_vs_op(VsOp::FieldAlign, entry.path.clone(), cfg, status);
+                        }
+                        if ui.button("Fix A/V Sync").clicked() {
+                            self.launch_fix_sync(entry.path.clone(), cfg, status);
                         }
                     }
                     FileKind::EditMaster => {
                         if ui.button("VDecimate").clicked() {
-                            self.launch_pipeline(
-                                format!("VDecimate {}", entry.name),
-                                cfg.vdecimate_script(),
-                                entry.path.clone(),
-                                &[],
-                                &[],
-                                cfg,
-                                status,
-                            );
+                            self.launch_vs_op(VsOp::Vdecimate, entry.path.clone(), cfg, status);
+                        }
+                        if ui.button("Fix A/V Sync").clicked() {
+                            self.launch_fix_sync(entry.path.clone(), cfg, status);
                         }
                         if ui.button("Viewer Encode").clicked() {
                             self.launch_pipeline(
@@ -957,6 +1021,12 @@ impl UpscalePanel {
                             Ok(()) => {
                                 *status = format!("Renamed to {new_name}");
                                 self.library.refresh(cfg);
+                                // Keep the renamed file selected so the action
+                                // panel (and Rename button) doesn't disappear —
+                                // otherwise a second rename requires re-clicking
+                                // the row first.
+                                self.library.selected =
+                                    self.library.entries.iter().position(|e| e.path == new_path);
                             }
                             Err(e) => *status = format!("Rename failed: {e}"),
                         }
@@ -1130,6 +1200,9 @@ fn suggest_viewer_name(path: &std::path::Path) -> String {
     let stem = stem.strip_suffix(".viewer").unwrap_or(stem);
     let stem = stem.strip_suffix("_VD").unwrap_or(stem);
     let stem = stem.strip_prefix("EDIT_MASTER-").unwrap_or(stem);
+    if stem.is_empty() {
+        return name.to_owned();
+    }
     if let Some(dash) = stem.find('-') {
         let type_part = &stem[..dash];
         let title_part = &stem[dash + 1..];
@@ -1141,5 +1214,44 @@ fn suggest_viewer_name(path: &std::path::Path) -> String {
             );
         }
     }
-    name.to_owned()
+    // No type/title dash to split on (e.g. a tape whose title itself has no
+    // internal "-", so it's not "TYPE-TITLE") — still title-case the whole
+    // stem instead of falling back to the untouched original name, which
+    // would silently offer the current filename as its own "suggestion" and
+    // make a same-name rename fail with a false "already exists".
+    format!("{}.mkv", title_words(stem))
+}
+
+#[cfg(test)]
+mod suggest_viewer_name_tests {
+    use super::suggest_viewer_name;
+    use std::path::Path;
+
+    #[test]
+    fn tagged_name_with_type_title_dash_is_humanized() {
+        let p = Path::new("EDIT_MASTER-VHS_TRAILER-THE_GREAT_MOUSE_DETECTIVE_VD.upscale.mkv");
+        assert_eq!(
+            suggest_viewer_name(p),
+            "VHS Trailer — The Great Mouse Detective.mkv"
+        );
+    }
+
+    /// Regression test: a tape title with no internal "-" (not a
+    /// "TYPE-TITLE" pattern) previously fell back to the untouched original
+    /// filename as its own "suggestion" — if that file was already
+    /// untagged, the suggestion was byte-identical to the current name, so
+    /// accepting it without editing failed with a false "already exists".
+    #[test]
+    fn dashless_untagged_name_is_still_title_cased_and_differs_from_input() {
+        let p = Path::new("TED_BARYLUKS_GROCERY.mkv");
+        let suggestion = suggest_viewer_name(p);
+        assert_eq!(suggestion, "Ted Baryluks Grocery.mkv");
+        assert_ne!(suggestion, "TED_BARYLUKS_GROCERY.mkv");
+    }
+
+    #[test]
+    fn dashless_tagged_name_strips_tags_and_title_cases() {
+        let p = Path::new("EDIT_MASTER-TED_BARYLUKS_GROCERY_VD.upscale.mkv");
+        assert_eq!(suggest_viewer_name(p), "Ted Baryluks Grocery.mkv");
+    }
 }
