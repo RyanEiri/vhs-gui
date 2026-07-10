@@ -7,6 +7,11 @@ use crate::panels::monitor::{CaptureState, MonitorPanel};
 use crate::panels::upscale::UpscalePanel;
 use crate::persist::AppSettings;
 
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+const GIT_HASH: &str = env!("VHS_GUI_GIT_HASH");
+const GIT_BRANCH: &str = env!("VHS_GUI_GIT_BRANCH");
+const GIT_DIRTY: &str = env!("VHS_GUI_GIT_DIRTY");
+
 pub struct App {
     cfg: Config,
     mpv: MpvView,
@@ -16,6 +21,7 @@ pub struct App {
     status: String,
     /// When Some, a settings save is due at this instant (debounced 750ms).
     save_due_at: Option<Instant>,
+    about_open: bool,
 }
 
 impl App {
@@ -40,6 +46,7 @@ impl App {
             status: String::new(),
             cfg,
             save_due_at: None,
+            about_open: false,
         })
     }
 
@@ -155,9 +162,55 @@ impl App {
                             }
                         }
                     }
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    let about_sel = egui::Button::selectable(self.about_open, "ℹ");
+                    if ui.add(about_sel).on_hover_text("About").clicked() {
+                        self.about_open = !self.about_open;
+                    }
                 });
             });
         view_changed
+    }
+
+    fn show_about_window(&mut self, ctx: &egui::Context) {
+        let exe = std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+        let profile = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        };
+
+        egui::Window::new("About vhs-gui")
+            .open(&mut self.about_open)
+            .resizable(false)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                egui::Grid::new("about_grid")
+                    .num_columns(2)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Version:");
+                        ui.label(VERSION);
+                        ui.end_row();
+
+                        ui.label("Commit:");
+                        ui.label(format!("{GIT_BRANCH}@{GIT_HASH}{GIT_DIRTY}"));
+                        ui.end_row();
+
+                        ui.label("Build:");
+                        ui.label(profile);
+                        ui.end_row();
+
+                        ui.label("Running from:");
+                        ui.label(exe);
+                        ui.end_row();
+                    });
+            });
     }
 }
 
@@ -201,9 +254,13 @@ impl eframe::App for App {
             self.toolbar(ui);
         });
 
-        // Icon-only left rail: Monitor (⏺) | Upscale (⬆).
+        // Icon-only left rail: Monitor (⏺) | Upscale (⬆) | About (ℹ).
         if self.show_rail(ctx) {
             self.arm_save();
+        }
+
+        if self.about_open {
+            self.show_about_window(ctx);
         }
 
         // Monitor view: collapsible Input settings panel (V4L2 hardware controls).

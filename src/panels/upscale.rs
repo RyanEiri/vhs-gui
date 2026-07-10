@@ -612,7 +612,16 @@ impl UpscalePanel {
                 ui.add_space(gap);
                 ui.vertical(|ui| {
                     ui.set_max_width(panel_w);
-                    ui.label(egui::RichText::new("Upscaled  4×").small().weak());
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "Upscaled  {}×",
+                                self.settings.internal_scale
+                            ))
+                            .small()
+                            .weak(),
+                        );
+                    });
                     ui.add(
                         egui::Image::new(egui::load::SizedTexture::from_handle(&textures.upscaled))
                             .fit_to_exact_size(egui::vec2(panel_w, panel_h)),
