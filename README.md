@@ -23,6 +23,23 @@ data directories (`~/Videos/captures/`, `~/Videos/logs/`, etc.) which are not pa
 this repo — they're local working directories referenced by absolute path from
 `src/config.rs`.
 
+## Hardware
+
+Built and run on a single Linux workstation:
+
+- **CPU:** AMD Ryzen 9 5900X (12-core).
+- **GPU:** AMD Radeon RX 7800 XT (RDNA 3, gfx1101) — drives Real-ESRGAN upscale
+  jobs via either backend (ROCm/PyTorch or Vulkan/ncnn; see the Upscale Settings
+  panel). ROCm is required for the community VHS-specific models — the Vulkan
+  binary segfaults on any model name outside its hardcoded family list.
+- **VHS capture device:** MacroSilicon MS210x USB video grabber ("EasierCAP"-type
+  dongle) — opened via V4L2 at a stable `/dev/v4l/by-id/...` path so it survives
+  USB port changes. `src/config.rs`'s `v4l2_device` default targets this device
+  specifically; override it for different capture hardware.
+- **Upscale scratch storage:** a secondary drive mounted at
+  `/media/ryan/Patriot/Videos/vhs_upscale_work/` — segment checkpoints for
+  chunked/resumable upscale jobs live there by default.
+
 ## Build & Launch
 
 ```bash
