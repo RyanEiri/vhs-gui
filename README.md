@@ -1,5 +1,20 @@
 # vhs-gui — VHS Capture & Playback GUI
 
+```
+        █                                    ▀
+ ▄   ▄  █ ▄▄    ▄▄▄           ▄▄▄▄  ▄   ▄  ▄▄▄
+ ▀▄ ▄▀  █▀  █  █   ▀         █▀ ▀█  █   █    █
+  █▄█   █   █   ▀▀▀▄   ▀▀▀   █   █  █   █    █
+   █    █   █  ▀▄▄▄▀         ▀█▄▀█  ▀▄▄▀█  ▄▄█▄▄
+                              ▄  █
+                               ▀▀
+```
+
+[![License: GPLv3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+![Language: Rust](https://img.shields.io/badge/language-Rust-DEA584.svg)
+![Platform: Linux](https://img.shields.io/badge/platform-Linux-lightgrey.svg)
+[![Release](https://img.shields.io/github/v/release/RyanEiri/vhs-gui)](https://github.com/RyanEiri/vhs-gui/releases)
+
 A native Rust desktop application that wraps VHS digitization — capture,
 processing, playback, and AI upscaling — in a single window. It's the primary
 day-to-day interface for tape digitization.
