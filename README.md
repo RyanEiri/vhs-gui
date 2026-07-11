@@ -167,5 +167,8 @@ remaining surface area is always visible in the source.
 - Requires the `libmpv2` runtime.
 - System `ffmpeg` at `/usr/bin/ffmpeg`.
 - `realesrgan-rocm` shim at `~/bin/realesrgan-rocm` for the ROCm upscale backend.
+  Model weights aren't bundled with this repo — grab pre-packaged archives
+  (official + community VHS-tuned, both `.pth` and ncnn formats) from
+  [vhs-cli's `models-v1` release](https://github.com/RyanEiri/vhs-cli/releases/tag/models-v1).
 - VapourSynth (`vspipe`) + `PYTHONPATH` pointing at `~/.local/share/vsrepo/py` for
   the deinterlace/telecine operations.
