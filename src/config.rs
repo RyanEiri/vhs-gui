@@ -13,7 +13,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/home/ryan".into()));
+        let home = PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/home/user".into()));
         let videos = home.join("Videos");
         let scripts = videos.join("vhs-cli");
         Self {
@@ -71,7 +71,14 @@ impl Config {
     pub fn upscale_bw_script(&self) -> PathBuf {
         self.scripts_dir.join("vhs_upscale_bw.sh")
     }
+    /// Scratch dir for chunked/resumable upscale checkpoints. Matches the
+    /// `WORK_ROOT` env var the bash upscale scripts already honor, so
+    /// setting it once affects both.
     pub fn upscale_work_root(&self) -> PathBuf {
-        PathBuf::from("/media/ryan/Patriot/Videos/vhs_upscale_work")
+        if let Ok(root) = std::env::var("WORK_ROOT") {
+            return PathBuf::from(root);
+        }
+        let user = std::env::var("USER").unwrap_or_else(|_| "user".into());
+        PathBuf::from(format!("/media/{user}/scratch/Videos/vhs_upscale_work"))
     }
 }
