@@ -94,8 +94,8 @@ Built and run on a single Linux workstation:
   [vhs-cli README](https://github.com/RyanEiri/vhs-cli#hardware), since
   that's the repo that owns the OBS config and logs it's diagnosed from.
 - **Upscale scratch storage:** a secondary drive mounted at
-  `/media/ryan/Patriot/Videos/vhs_upscale_work/` — segment checkpoints for
-  chunked/resumable upscale jobs live there by default.
+  `/media/<user>/<external-drive>/Videos/vhs_upscale_work/` — segment
+  checkpoints for chunked/resumable upscale jobs live there by default.
 
 ## Build & Launch
 
