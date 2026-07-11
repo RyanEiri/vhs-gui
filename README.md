@@ -56,6 +56,16 @@ Built and run on a single Linux workstation:
   - Video and audio are two independent USB interfaces on the same dongle,
     not a hardware-synced A/V pair — they drift over a long capture. Native
     "Fix A/V Sync" corrects this after the fact.
+- **Not used by this app, but worth noting:** the same machine also has a
+  Blackmagic Design Intensity Pro PCIe capture card (used only by vhs-cli's
+  separate OBS `game` env slot, for console capture — unrelated to VHS
+  digitization). The cheap USB dongle above is the one that actually works;
+  the "proper" dedicated capture card currently does not — every logged OBS
+  session shows `decklink: Failed to enable video input`, 100% of attempts
+  across two months of logs, likely from a version gap between the decklink
+  plugin's compiled SDK (12.0) and the installed Desktop Video driver
+  (15.3/15.3.1). See the
+  [vhs-cli README](https://github.com/RyanEiri/vhs-cli#hardware) for details.
 - **Upscale scratch storage:** a secondary drive mounted at
   `/media/ryan/Patriot/Videos/vhs_upscale_work/` — segment checkpoints for
   chunked/resumable upscale jobs live there by default.
