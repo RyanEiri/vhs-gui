@@ -202,23 +202,35 @@ impl MonitorPanel {
             .map(|d| Instant::now() >= d)
             .unwrap_or(false)
         {
-            let needs = self.do_stop_capture(status);
-            *status = "Capture stopped (timer)".into();
-            return needs;
+            self.capture.stop();
+            self.end_capture_to_monitoring(mpv, cfg);
+            *status = "Capture stopped (timer) — monitoring live signal".into();
+            return true;
         }
 
         // Natural end: ffmpeg exited on its own (hit -t cap, or normal finish).
         if !self.capture.is_running() {
-            self.preview_opened = false;
-            self.capture_last_reopen_at = None;
-            self.capture_stop_at = None;
-            self.capture_stop_input.clear();
-            self.state = CaptureState::Idle;
-            *status = "Capture ended".into();
+            self.end_capture_to_monitoring(mpv, cfg);
+            *status = "Capture ended — monitoring live signal".into();
             return true;
         }
 
         false
+    }
+
+    /// Shared cleanup after a timer-driven capture end (natural `-t` safety
+    /// cap, or the GUI "Stop after" deadline) — the archival file is done,
+    /// but the user likely still wants the live feed rather than a frozen
+    /// last frame, so hand the V4L2 device straight back to Monitoring
+    /// instead of dropping to Idle. Manual "Stop Capture" is unaffected —
+    /// it still goes to Idle via `do_stop_capture`.
+    fn end_capture_to_monitoring(&mut self, mpv: &mut MpvView, cfg: &Config) {
+        self.preview_opened = false;
+        self.capture_last_reopen_at = None;
+        self.capture_stop_at = None;
+        self.capture_stop_input.clear();
+        mpv.open(&Source::V4l2(cfg.v4l2_device.clone()));
+        self.state = CaptureState::Monitoring;
     }
 
     fn begin_capture(&mut self, mpv: &mut MpvView, cfg: &Config, status: &mut String) {
