@@ -32,14 +32,17 @@ impl Config {
 
     /// Env fallback (matches the bash scripts' own WORK_ROOT convention),
     /// then the hardcoded generic default, only used when neither a GUI
-    /// override nor WORK_ROOT is set.
+    /// override nor WORK_ROOT is set. The hardcoded default lives under
+    /// videos_dir rather than assuming an external "scratch" mount exists —
+    /// a machine-specific assumption that isn't true for a fresh clone and
+    /// fails with a permission error rather than a missing-file one, which
+    /// is a much less obvious thing to debug. Users with a real external
+    /// scratch drive should set WORK_ROOT or use the GUI's Working
+    /// Directories window.
     pub fn default_work_root() -> PathBuf {
         std::env::var("WORK_ROOT")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                let user = std::env::var("USER").unwrap_or_else(|_| "user".into());
-                PathBuf::from(format!("/media/{user}/scratch/Videos/vhs_upscale_work"))
-            })
+            .unwrap_or_else(|_| Self::home().join("Videos/vhs_upscale_work"))
     }
 
     /// Layers persisted GUI overrides over env vars over hardcoded defaults.

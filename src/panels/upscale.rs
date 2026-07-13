@@ -498,26 +498,14 @@ impl UpscalePanel {
             // resets the index — otherwise the action panel (and its Rename
             // button) vanishes and the user has to re-click the row.
             let reselect_path = job.output_path.clone();
-            let finish_status = if job.is_upscale {
+            let finish_status = if job_failed(job.exit_ok, &job.output_path) {
+                format!("{} FAILED — see log", job.label)
+            } else if job.is_upscale {
                 cleanup_upscale_work_dir(&job.output_path, &job.segments_dir)
                     .map(|msg| format!("{} finished — {msg}", job.label))
                     .unwrap_or_else(|| format!("{} finished", job.label))
             } else {
-                // exit_ok is only meaningful for native jobs (bash jobs never
-                // check exit codes today); a tracked output_path that's
-                // missing is also treated as failure. Untracked (None)
-                // output_path isn't penalized — it was never checked before.
-                let exit_failed = job.exit_ok == Some(false);
-                let output_missing = job
-                    .output_path
-                    .as_deref()
-                    .map(|p| !p.is_file())
-                    .unwrap_or(false);
-                if exit_failed || output_missing {
-                    format!("{} FAILED — see log", job.label)
-                } else {
-                    format!("{} finished", job.label)
-                }
+                format!("{} finished", job.label)
             };
             *status = finish_status;
             self.last_preview_at = None;
@@ -1147,6 +1135,19 @@ impl UpscalePanel {
 // Free helpers
 // -----------------------------------------------------------------------
 
+/// True if a finished job should be reported as failed: a non-zero exit
+/// (native jobs only — bash jobs don't check exit codes today), or a
+/// tracked output_path that never actually appeared. Untracked (None)
+/// output_path isn't penalized — it was never checked before.
+fn job_failed(exit_ok: Option<bool>, output_path: &Option<PathBuf>) -> bool {
+    let exit_failed = exit_ok == Some(false);
+    let output_missing = output_path
+        .as_deref()
+        .map(|p| !p.is_file())
+        .unwrap_or(false);
+    exit_failed || output_missing
+}
+
 fn cleanup_upscale_work_dir(
     output_path: &Option<PathBuf>,
     segments_dir: &Option<PathBuf>,
@@ -1234,6 +1235,41 @@ fn suggest_viewer_name(path: &std::path::Path) -> String {
     // would silently offer the current filename as its own "suggestion" and
     // make a same-name rename fail with a false "already exists".
     format!("{}.mkv", title_words(stem))
+}
+
+#[cfg(test)]
+mod job_failed_tests {
+    use super::job_failed;
+    use std::path::PathBuf;
+
+    #[test]
+    fn nonzero_exit_is_failure_even_with_output_present() {
+        let f = std::env::temp_dir().join("vhs_gui_job_failed_test_present.mkv");
+        std::fs::write(&f, b"x").unwrap();
+        assert!(job_failed(Some(false), &Some(f.clone())));
+        let _ = std::fs::remove_file(&f);
+    }
+
+    #[test]
+    fn missing_output_is_failure_even_with_clean_exit() {
+        let f = PathBuf::from("/nonexistent/vhs_gui_job_failed_test.mkv");
+        assert!(job_failed(Some(true), &Some(f)));
+    }
+
+    #[test]
+    fn clean_exit_with_existing_output_is_success() {
+        let f = std::env::temp_dir().join("vhs_gui_job_failed_test_ok.mkv");
+        std::fs::write(&f, b"x").unwrap();
+        assert!(!job_failed(Some(true), &Some(f.clone())));
+        let _ = std::fs::remove_file(&f);
+    }
+
+    #[test]
+    fn untracked_output_path_is_not_penalized() {
+        // None output_path means it was never checked before this job type
+        // supported tracking — don't treat that as failure on its own.
+        assert!(!job_failed(None, &None));
+    }
 }
 
 #[cfg(test)]
