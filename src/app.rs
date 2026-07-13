@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
@@ -22,11 +23,20 @@ pub struct App {
     /// When Some, a settings save is due at this instant (debounced 750ms).
     save_due_at: Option<Instant>,
     about_open: bool,
+    paths_open: bool,
+    /// Raw text-field contents for the Working Directories window. Blank
+    /// means "no override" — see `AppSettings::capture_from`.
+    paths_scripts_input: String,
+    paths_work_root_input: String,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> anyhow::Result<Self> {
-        let cfg = Config::default();
+        // Loaded before Config so persisted path overrides (if any) are baked
+        // into cfg from the start, rather than applied after the fact.
+        let saved = AppSettings::load();
+        let cfg = Config::from_paths(&saved.paths);
+
         let mut mpv = MpvView::new(cc)?;
         mpv.wire_repaint(cc.egui_ctx.clone());
 
@@ -34,9 +44,11 @@ impl App {
         let mut upscale = UpscalePanel::new(&cfg);
         let mut view_mode = ViewMode::Monitor;
 
-        // Restore persisted settings; apply V4L2 preset to hardware on startup.
-        let saved = AppSettings::load();
+        // Restore remaining persisted settings; apply V4L2 preset to hardware on startup.
         saved.apply_to(&mut view_mode, &mut monitor.v4l2, &mut upscale.settings);
+
+        let paths_scripts_input = saved.paths.scripts_dir.clone().unwrap_or_default();
+        let paths_work_root_input = saved.paths.work_root.clone().unwrap_or_default();
 
         Ok(Self {
             monitor,
@@ -47,6 +59,9 @@ impl App {
             cfg,
             save_due_at: None,
             about_open: false,
+            paths_open: false,
+            paths_scripts_input,
+            paths_work_root_input,
         })
     }
 
@@ -166,6 +181,18 @@ impl App {
                     ui.add_space(8.0);
                     ui.separator();
                     ui.add_space(4.0);
+                    let paths_sel = egui::Button::selectable(self.paths_open, "📁");
+                    if ui
+                        .add(paths_sel)
+                        .on_hover_text("Working Directories")
+                        .clicked()
+                    {
+                        self.paths_open = !self.paths_open;
+                    }
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
                     let about_sel = egui::Button::selectable(self.about_open, "ℹ");
                     if ui.add(about_sel).on_hover_text("About").clicked() {
                         self.about_open = !self.about_open;
@@ -212,6 +239,99 @@ impl App {
                     });
             });
     }
+
+    /// Videos directory (data root) is deliberately not editable here:
+    /// several vhs-cli scripts (vhs_capture_ffmpeg.sh in particular) hardcode
+    /// $HOME/Videos internally with no env override, so making it
+    /// GUI-editable on the Rust side alone would desync the library view
+    /// from where captures actually land. Scripts dir and work root are
+    /// safe — every consumer reads cfg fresh per action, so a change here
+    /// takes effect on the next button click, no restart needed.
+    fn show_paths_window(&mut self, ctx: &egui::Context) {
+        let mut changed = false;
+        egui::Window::new("Working Directories")
+            .open(&mut self.paths_open)
+            .resizable(false)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.label(
+                    egui::RichText::new("Leave a field blank to use its env var / default.")
+                        .weak()
+                        .small(),
+                );
+                ui.add_space(6.0);
+                egui::Grid::new("paths_grid")
+                    .num_columns(2)
+                    .spacing([10.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.label("Scripts dir (vhs-cli):");
+                        changed |= path_field(
+                            ui,
+                            &mut self.paths_scripts_input,
+                            &Config::default_scripts_dir(),
+                        );
+                        ui.end_row();
+
+                        ui.label("Upscale work root:");
+                        changed |= path_field(
+                            ui,
+                            &mut self.paths_work_root_input,
+                            &Config::default_work_root(),
+                        );
+                        ui.end_row();
+                    });
+
+                ui.add_space(6.0);
+                if ui.button("Reset both to defaults").clicked() {
+                    self.paths_scripts_input.clear();
+                    self.paths_work_root_input.clear();
+                    changed = true;
+                }
+            });
+
+        if changed {
+            self.cfg.scripts_dir = if self.paths_scripts_input.trim().is_empty() {
+                Config::default_scripts_dir()
+            } else {
+                PathBuf::from(self.paths_scripts_input.trim())
+            };
+            self.cfg.work_root = if self.paths_work_root_input.trim().is_empty() {
+                Config::default_work_root()
+            } else {
+                PathBuf::from(self.paths_work_root_input.trim())
+            };
+            self.arm_save();
+        }
+    }
+}
+
+/// A path text field with an existence indicator and a hint showing the
+/// resolved default when left blank. Returns true if the field changed.
+fn path_field(ui: &mut egui::Ui, buf: &mut String, default: &std::path::Path) -> bool {
+    let mut changed = false;
+    ui.horizontal(|ui| {
+        let resp = ui.add(
+            egui::TextEdit::singleline(buf)
+                .desired_width(320.0)
+                .hint_text(default.to_string_lossy()),
+        );
+        changed = resp.changed();
+        let effective = if buf.trim().is_empty() {
+            default.to_path_buf()
+        } else {
+            PathBuf::from(buf.trim())
+        };
+        if effective.is_dir() {
+            ui.label(egui::RichText::new("✓").color(egui::Color32::GREEN));
+        } else {
+            ui.label(
+                egui::RichText::new("⚠ not found")
+                    .color(egui::Color32::YELLOW)
+                    .small(),
+            );
+        }
+    });
+    changed
 }
 
 impl eframe::App for App {
@@ -234,8 +354,14 @@ impl eframe::App for App {
             .unwrap_or(false)
         {
             self.save_due_at = None;
-            AppSettings::capture_from(&self.view_mode, &self.monitor.v4l2, &self.upscale.settings)
-                .save();
+            AppSettings::capture_from(
+                &self.view_mode,
+                &self.monitor.v4l2,
+                &self.upscale.settings,
+                &self.paths_scripts_input,
+                &self.paths_work_root_input,
+            )
+            .save();
         }
 
         // 3. Poll capture state machine.
@@ -261,6 +387,10 @@ impl eframe::App for App {
 
         if self.about_open {
             self.show_about_window(ctx);
+        }
+
+        if self.paths_open {
+            self.show_paths_window(ctx);
         }
 
         // Monitor view: collapsible Input settings panel (V4L2 hardware controls).

@@ -258,7 +258,10 @@ impl MonitorPanel {
 
     fn do_start_capture(&mut self, cfg: &Config, status: &mut String) {
         self.capture.cancel_stop_timer();
-        match self.capture.start(&cfg.capture_script, &self.max_duration) {
+        match self
+            .capture
+            .start(&cfg.capture_script(), &self.max_duration)
+        {
             Ok(()) => {
                 self.state = CaptureState::Capturing;
                 self.preview_opened = false;

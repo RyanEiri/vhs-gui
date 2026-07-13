@@ -752,7 +752,15 @@ impl UpscalePanel {
         let seg_dir = Self::upscale_segments_dir(&input, cfg);
         let seg_secs = self.settings.segment_secs;
 
-        let (owned_envs, owned_args) = self.settings.to_launch(&output);
+        let (mut owned_envs, owned_args) = self.settings.to_launch(&output);
+        // WORK_ROOT must be passed explicitly: the bash script otherwise
+        // resolves its own default independently of cfg.upscale_work_root(),
+        // which is what Rust uses for segment-checkpoint bookkeeping above —
+        // without this they can silently point at different directories.
+        owned_envs.push((
+            "WORK_ROOT".into(),
+            cfg.upscale_work_root().to_string_lossy().into_owned(),
+        ));
         let env_refs: Vec<(&str, &str)> = owned_envs
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -810,11 +818,17 @@ impl UpscalePanel {
                             );
                         }
                         if ui.button("Denoise+QTGMC").clicked() {
+                            // vhs_process.sh resolves its own DENOISE_SH/VPY via
+                            // SCRIPTS_DIR internally — pass it explicitly so a
+                            // GUI-configured scripts_dir actually reaches it,
+                            // rather than the script falling back to its own
+                            // hardcoded default.
+                            let scripts_dir = cfg.scripts_dir.to_string_lossy().into_owned();
                             self.launch_pipeline(
                                 format!("Denoise+QTGMC {}", entry.name),
                                 cfg.process_script(),
                                 entry.path.clone(),
-                                &[("NO_LAUNCH", "1")],
+                                &[("NO_LAUNCH", "1"), ("SCRIPTS_DIR", &scripts_dir)],
                                 &[],
                                 cfg,
                                 status,

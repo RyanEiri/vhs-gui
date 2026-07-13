@@ -53,6 +53,23 @@ impl Default for PersistedUpscaleSettings {
 }
 
 // -----------------------------------------------------------------------
+// PersistedPaths — user overrides for working directories, GUI-editable.
+// A blank/absent value means "use the env var / hardcoded default" — see
+// Config::from_paths. videos_dir is intentionally not included here: several
+// vhs-cli scripts (vhs_capture_ffmpeg.sh in particular) hardcode
+// $HOME/Videos internally with no env override, so making it GUI-editable
+// on the Rust side alone would silently desync the GUI's library view from
+// where captures actually land.
+// -----------------------------------------------------------------------
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct PersistedPaths {
+    pub scripts_dir: Option<String>,
+    pub work_root: Option<String>,
+}
+
+// -----------------------------------------------------------------------
 // AppSettings — top-level TOML document
 // -----------------------------------------------------------------------
 
@@ -62,6 +79,7 @@ pub struct AppSettings {
     pub mode: ViewMode,
     pub v4l2: BTreeMap<String, i32>,
     pub upscale: PersistedUpscaleSettings,
+    pub paths: PersistedPaths,
 }
 
 impl AppSettings {
@@ -130,11 +148,20 @@ impl AppSettings {
     }
 
     /// Snapshot current live state into an AppSettings ready for saving.
+    /// `scripts_dir_input`/`work_root_input` are the raw text-field contents
+    /// from the Working Directories window; blank means "no override" (None).
     pub fn capture_from(
         view_mode: &ViewMode,
         v4l2: &V4l2Controls,
         upscale: &UpscaleSettings,
+        scripts_dir_input: &str,
+        work_root_input: &str,
     ) -> Self {
+        fn non_empty(s: &str) -> Option<String> {
+            let t = s.trim();
+            (!t.is_empty()).then(|| t.to_owned())
+        }
+
         let model_name = upscale.selected_model().map(|s| s.to_owned());
         Self {
             mode: *view_mode,
@@ -154,6 +181,48 @@ impl AppSettings {
                 batch_size: upscale.batch_size,
                 denoise: upscale.denoise,
             },
+            paths: PersistedPaths {
+                scripts_dir: non_empty(scripts_dir_input),
+                work_root: non_empty(work_root_input),
+            },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_paths_table_deserializes_to_defaults() {
+        // Simulates a config.toml saved before PersistedPaths existed.
+        let old_format = "mode = \"monitor\"\n";
+        let settings: AppSettings = toml::from_str(old_format).unwrap();
+        assert!(settings.paths.scripts_dir.is_none());
+        assert!(settings.paths.work_root.is_none());
+    }
+
+    #[test]
+    fn paths_round_trip_through_toml() {
+        let settings = AppSettings {
+            paths: PersistedPaths {
+                scripts_dir: Some("/tmp/scripts".into()),
+                work_root: Some("/tmp/work".into()),
+            },
+            ..Default::default()
+        };
+        let text = toml::to_string_pretty(&settings).unwrap();
+        let back: AppSettings = toml::from_str(&text).unwrap();
+        assert_eq!(back.paths.scripts_dir.as_deref(), Some("/tmp/scripts"));
+        assert_eq!(back.paths.work_root.as_deref(), Some("/tmp/work"));
+    }
+
+    #[test]
+    fn capture_from_blank_input_yields_none() {
+        let v4l2 = V4l2Controls::new("/dev/video0");
+        let upscale = UpscaleSettings::default();
+        let settings = AppSettings::capture_from(&ViewMode::Monitor, &v4l2, &upscale, "  ", "");
+        assert!(settings.paths.scripts_dir.is_none());
+        assert!(settings.paths.work_root.is_none());
     }
 }
