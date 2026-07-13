@@ -161,11 +161,7 @@ impl UpscalePanel {
                     // Auto-infer internal scale when model changes.
                     if self.settings.model_idx != prev_idx {
                         changed = true;
-                        if let Some(name) = self.settings.selected_model()
-                            && let Some(s) = crate::settings::infer_scale(name)
-                        {
-                            self.settings.internal_scale = s;
-                        }
+                        self.settings.sync_scale_to_model();
                     }
                     if self.settings.backend == Backend::Rocm {
                         ui.label(
@@ -185,8 +181,9 @@ impl UpscalePanel {
                     .and_then(crate::settings::infer_scale);
                 if let Some(s) = fixed_scale {
                     // Model has a known native scale — lock it and keep it in sync.
-                    if self.settings.internal_scale != s {
-                        self.settings.internal_scale = s;
+                    let prev = self.settings.internal_scale;
+                    self.settings.sync_scale_to_model();
+                    if self.settings.internal_scale != prev {
                         changed = true;
                     }
                     ui.add_enabled(
@@ -735,6 +732,12 @@ impl UpscalePanel {
         cfg: &Config,
         status: &mut String,
     ) {
+        // Guaranteed correct regardless of whether the settings panel was
+        // open (see sync_scale_to_model's doc comment) — a stale scale here
+        // would both upscale at the wrong factor and corrupt the resume
+        // fingerprint match against any existing checkpoint for this file.
+        self.settings.sync_scale_to_model();
+
         Self::clear_stale_work_dir(&input, cfg, self.settings.selected_model());
 
         let seg_dir = Self::upscale_segments_dir(&input, cfg);

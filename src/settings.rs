@@ -246,10 +246,21 @@ impl UpscaleSettings {
         if self.model_idx > max {
             self.model_idx = 0;
         }
-        // Auto-infer internal scale from model name.
-        if let Some(name) = self.selected_model()
-            && let Some(s) = infer_scale(name)
-        {
+        self.sync_scale_to_model();
+    }
+
+    /// Force internal_scale to match the selected model's inferred native
+    /// scale, if one is known (models with no inferrable scale keep whatever
+    /// the user picked). Previously this correction only ran inside the
+    /// settings panel's per-frame UI code, so a stale internal_scale from an
+    /// earlier model selection could silently survive if that panel was
+    /// closed — reaching a launch and corrupting a resume's config
+    /// fingerprint match against an existing checkpoint. Called here, from
+    /// rescan(), and unconditionally at the top of launch_upscale() so a
+    /// launched job can never disagree with its own model's scale
+    /// regardless of UI panel state.
+    pub fn sync_scale_to_model(&mut self) {
+        if let Some(s) = self.selected_model().and_then(infer_scale) {
             self.internal_scale = s;
         }
     }
@@ -301,5 +312,62 @@ impl UpscaleSettings {
         ];
 
         (envs, args)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_scale_to_model_corrects_stale_scale_from_prior_model() {
+        // Reproduces the real bug: internal_scale left at 4 (e.g. from a
+        // previously selected 4x model, with the settings panel closed so
+        // the UI-only correction never ran), then the user selects a 1x
+        // model. Before this fix, a launch in this state would silently use
+        // the wrong scale and corrupt any resume fingerprint match.
+        let mut s = UpscaleSettings {
+            backend: Backend::Rocm,
+            ..Default::default()
+        };
+        let idx = s
+            .effective_model_list()
+            .iter()
+            .position(|m| *m == "VHS-Sharpen-1x")
+            .unwrap();
+        s.model_idx = idx;
+        s.internal_scale = 4;
+        s.sync_scale_to_model();
+        assert_eq!(s.internal_scale, 1);
+    }
+
+    #[test]
+    fn sync_scale_to_model_leaves_unrecognized_model_alone() {
+        let mut s = UpscaleSettings {
+            backend: Backend::Vulkan,
+            scanned_models: vec!["some-community-model".into()],
+            model_idx: 0,
+            internal_scale: 3,
+            ..Default::default()
+        };
+        s.sync_scale_to_model();
+        assert_eq!(s.internal_scale, 3);
+    }
+
+    #[test]
+    fn rescan_also_corrects_stale_scale() {
+        let mut s = UpscaleSettings {
+            backend: Backend::Rocm,
+            ..Default::default()
+        };
+        let idx = s
+            .effective_model_list()
+            .iter()
+            .position(|m| *m == "realesrgan-x2plus")
+            .unwrap();
+        s.model_idx = idx;
+        s.internal_scale = 4;
+        s.rescan();
+        assert_eq!(s.internal_scale, 2);
     }
 }
