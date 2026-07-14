@@ -907,6 +907,9 @@ impl UpscalePanel {
                                 status,
                             );
                         }
+                        if ui.button("Fix A/V Sync").clicked() {
+                            self.launch_fix_sync(entry.path.clone(), cfg, status);
+                        }
                     }
                     FileKind::Viewer => {
                         if ui.button("Upscale").clicked() {
@@ -941,6 +944,9 @@ impl UpscalePanel {
                                 cfg,
                                 status,
                             );
+                        }
+                        if ui.button("Fix A/V Sync").clicked() {
+                            self.launch_fix_sync(entry.path.clone(), cfg, status);
                         }
                     }
                 }
