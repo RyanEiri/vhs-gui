@@ -847,9 +847,6 @@ impl UpscalePanel {
                         if ui.button("VDecimate").clicked() {
                             self.launch_vs_op(VsOp::Vdecimate, entry.path.clone(), cfg, status);
                         }
-                        if ui.button("Fix A/V Sync").clicked() {
-                            self.launch_fix_sync(entry.path.clone(), cfg, status);
-                        }
                         if ui.button("Viewer Encode").clicked() {
                             self.launch_pipeline(
                                 format!("Viewer Encode {}", entry.name),
@@ -860,6 +857,31 @@ impl UpscalePanel {
                                 cfg,
                                 status,
                             );
+                        }
+                        if ui.button("Upscale Video").clicked() {
+                            let out = Self::upscale_output(&entry.path, cfg);
+                            self.launch_upscale(
+                                format!("Upscale Video {}", entry.name),
+                                cfg.upscale_script(),
+                                entry.path.clone(),
+                                out,
+                                cfg,
+                                status,
+                            );
+                        }
+                        if ui.button("Upscale Video B&W").clicked() {
+                            let out = Self::upscale_output(&entry.path, cfg);
+                            self.launch_upscale(
+                                format!("Upscale Video B&W {}", entry.name),
+                                cfg.upscale_bw_script(),
+                                entry.path.clone(),
+                                out,
+                                cfg,
+                                status,
+                            );
+                        }
+                        if ui.button("Fix A/V Sync").clicked() {
+                            self.launch_fix_sync(entry.path.clone(), cfg, status);
                         }
                     }
                     FileKind::EditMasterVD => {
