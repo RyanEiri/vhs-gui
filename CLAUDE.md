@@ -98,3 +98,9 @@ Tags: `v0.1.0` (single-view build), `v0.2.0` (dual-panel Monitor/Upscale rework)
 System install target: `/usr/local/bin/vhs-gui`, launched via
 `~/.local/share/applications/vhs-gui.desktop` (`install-desktop.sh` manages both).
 Release process: `cargo build --release` → `sudo install` → bump `Cargo.toml` → tag.
+
+`[profile.release]` sets `strip = true` — the installed production binary has no
+symbols. A crash address from `dmesg`/`journalctl` won't resolve against it. To
+debug a real crash, build a temporary symbol-retaining binary (unset `strip`, or
+use the debug profile) rather than trying to resolve addresses against the stripped
+release build.

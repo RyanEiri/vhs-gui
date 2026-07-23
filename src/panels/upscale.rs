@@ -732,6 +732,26 @@ impl UpscalePanel {
         cfg: &Config,
         status: &mut String,
     ) {
+        let seg_dir = Self::upscale_segments_dir(&input, cfg);
+        let seg_secs = self.settings.segment_secs;
+
+        // A job from an earlier vhs-gui process (e.g. one that exited when a
+        // display-wake event disrupted the GL surface — see on_exit's doc
+        // comment) may still be running against this exact work dir. Reattach
+        // to it instead of spawning a second Real-ESRGAN process on top of the
+        // same checkpoint segments, which would corrupt them.
+        if let Some(work_dir) = seg_dir.parent()
+            && let Some(pgid) = PipelineJob::check_lock(work_dir)
+        {
+            let job = PipelineJob::attach_running(pgid, label, &input, seg_dir, output, seg_secs);
+            *status = format!("Reattached to already-running upscale (pid {pgid})");
+            self.last_preview_at = None;
+            self.last_preview_frames = 0;
+            self.preview_textures = None;
+            self.pipeline = Some(job);
+            return;
+        }
+
         // Guaranteed correct regardless of whether the settings panel was
         // open (see sync_scale_to_model's doc comment) — a stale scale here
         // would both upscale at the wrong factor and corrupt the resume
@@ -739,9 +759,6 @@ impl UpscalePanel {
         self.settings.sync_scale_to_model();
 
         Self::clear_stale_work_dir(&input, cfg, self.settings.selected_model());
-
-        let seg_dir = Self::upscale_segments_dir(&input, cfg);
-        let seg_secs = self.settings.segment_secs;
 
         let (mut owned_envs, owned_args) = self.settings.to_launch(&output);
         // WORK_ROOT must be passed explicitly: the bash script otherwise

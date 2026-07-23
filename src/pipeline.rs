@@ -61,6 +61,26 @@ pub struct PipelineJob {
     pub output_path: Option<PathBuf>,
     /// When `Some(n)`, send SIGINT as soon as `completed_segments > n`.
     stop_after_segment_at: Option<u64>,
+    /// True when this job wasn't spawned by us — it was already running when
+    /// we found its lock file (see `attach_running`) and we only observe it
+    /// (segment/frame counts on disk, pgid liveness), never `child.try_wait()`.
+    reattached: bool,
+}
+
+/// `vhs_upscale.sh` already writes its own pgid here at startup and removes it
+/// via `trap ... EXIT` — reuse that instead of a second, Rust-only lock file.
+/// Used to detect a job still running from a previous vhs-gui process (see
+/// module-level doc on `on_exit` for why a job can now outlive the GUI that
+/// started it) — works regardless of which vhs-gui binary (or none at all)
+/// launched it, since the script writes this unconditionally.
+fn lock_path(work_dir: &Path) -> PathBuf {
+    work_dir.join("upscale.pgid")
+}
+
+/// True if a process with this pid exists (signal 0 — doesn't actually signal it).
+fn pid_alive(pid: Pid) -> bool {
+    use nix::sys::signal::kill;
+    kill(pid, None).is_ok()
 }
 
 /// Shared preamble for every spawn path: probes the input, builds the log
@@ -154,6 +174,7 @@ fn base_job(prep: SpawnPrep, child: Child, aux_child: Option<Child>, pgid: Pid) 
         output_path: None,
         paused: false,
         stop_after_segment_at: None,
+        reattached: false,
     }
 }
 
@@ -244,6 +265,64 @@ impl PipelineJob {
         Ok(base_job(prep, consumer_child, Some(producer_child), pgid))
     }
 
+    /// Check whether an upscale work dir has a live lock from a job we didn't
+    /// spawn (started by an earlier vhs-gui process that exited without it —
+    /// see `on_exit`). Returns the still-running pgid, if any.
+    pub fn check_lock(work_dir: &Path) -> Option<Pid> {
+        let raw = fs::read_to_string(lock_path(work_dir)).ok()?;
+        let pgid = Pid::from_raw(raw.trim().parse().ok()?);
+        pid_alive(pgid).then_some(pgid)
+    }
+
+    /// Reconstruct a `PipelineJob` for an upscale already running under `pgid`
+    /// (found via `check_lock`), so the UI can show its progress and Cancel
+    /// button exactly as if this process had spawned it. No `Child` handle
+    /// exists — liveness and completion are inferred from `pgid` and the
+    /// output file, the same signals a segment-checkpoint resume already uses.
+    pub fn attach_running(
+        pgid: Pid,
+        label: impl Into<String>,
+        input: &Path,
+        segments_dir: PathBuf,
+        output_path: PathBuf,
+        segment_secs: u32,
+    ) -> Self {
+        let (total_frames, total_duration_secs) = probe_video_info(input);
+        let frames_dir = segments_dir.parent().map(|d| d.join("frames"));
+        let frames_up_dir = segments_dir.parent().map(|d| d.join("frames_up"));
+        let total_segments = if total_duration_secs > 0.0 && segment_secs > 0 {
+            (total_duration_secs / segment_secs as f64).ceil() as u64
+        } else {
+            0
+        };
+        PipelineJob {
+            child: None,
+            aux_child: None,
+            pgid,
+            exit_ok: None,
+            label: label.into(),
+            done: false,
+            current_frame: 0,
+            total_frames,
+            current_time_secs: 0.0,
+            total_duration_secs,
+            script_log: None,
+            started_at: Instant::now(),
+            is_upscale: true,
+            segments_dir: Some(segments_dir),
+            frames_dir,
+            frames_up_dir,
+            completed_segments: 0,
+            total_segments,
+            upscaled_frames: 0,
+            segment_frames: 0,
+            output_path: Some(output_path),
+            paused: false,
+            stop_after_segment_at: None,
+            reattached: true,
+        }
+    }
+
     /// Spawn a single native process (no pipe) — e.g. the one-shot `ffmpeg`
     /// call used by A/V sync correction.
     pub fn start_native_single(
@@ -305,6 +384,14 @@ impl PipelineJob {
                     self.reap_aux_child();
                 }
                 Ok(None) => {}
+            }
+        } else if self.reattached {
+            // No Child handle to try_wait() — the pgid's liveness is the only
+            // signal we have. Success/failure is inferred from the output file,
+            // same convention every job already uses in the absence of an exit code.
+            if !pid_alive(self.pgid) {
+                self.exit_ok = Some(self.output_path.as_ref().is_some_and(|p| p.exists()));
+                self.done = true;
             }
         } else {
             self.done = true;
@@ -369,6 +456,9 @@ impl PipelineJob {
         } else {
             0
         };
+        // No lock file to write here — `vhs_upscale.sh` already writes/removes
+        // its own `WORK_DIR/upscale.pgid` (see `lock_path`'s doc comment),
+        // which is what a later vhs-gui process reads via `check_lock`.
         self
     }
 
@@ -394,8 +484,10 @@ impl PipelineJob {
     /// Send SIGINT to the job's process group.
     /// Safe because every constructor sets `pgid` to the actual group leader
     /// (child pid for bash/single jobs, producer pid for native pipe jobs).
+    /// Also valid for a reattached job — `pgid` there is the still-live pid
+    /// `check_lock` verified, and killpg on an exited group is a harmless no-op.
     pub fn cancel(&self) {
-        if self.child.is_some() {
+        if self.child.is_some() || self.reattached {
             use nix::sys::signal::{Signal, killpg};
             let _ = killpg(self.pgid, Signal::SIGINT);
         }
@@ -406,7 +498,7 @@ impl PipelineJob {
     /// producer+consumer pair) are paused / resumed together.
     pub fn toggle_pause(&mut self) {
         use nix::sys::signal::{Signal, killpg};
-        if self.child.is_some() {
+        if self.child.is_some() || self.reattached {
             if self.paused {
                 let _ = killpg(self.pgid, Signal::SIGCONT);
                 self.paused = false;
@@ -436,38 +528,39 @@ impl PipelineJob {
     /// Parses both `frame=` (for the frame counter display) and `time=HH:MM:SS.xx`
     /// (for accurate time-based progress that works regardless of fps changes).
     fn update_frame_count(&mut self) {
-        let Some(ref log) = self.script_log else {
-            return;
-        };
+        // ffmpeg frame=/time= log tailing — unavailable for a reattached job
+        // (script_log is None; we don't know its original log path), but the
+        // disk-based segment/frame counting below must still run for one, so
+        // this can only early-return the log-tailing part, not the whole fn.
+        if let Some(ref log) = self.script_log
+            && let Ok(file) = fs::File::open(log)
+        {
+            let reader = BufReader::new(file);
 
-        let Ok(file) = fs::File::open(log) else {
-            return;
-        };
-        let reader = BufReader::new(file);
-
-        // ffmpeg writes progress as `\r`-delimited runs within a single `\n`-line
-        // (or as plain `\n`-lines when not a tty).  Split on both to be safe.
-        let mut last_frame: Option<u64> = None;
-        let mut last_time: Option<f64> = None;
-        for raw_line in reader.lines().map_while(|l| l.ok()) {
-            for segment in raw_line.split('\r') {
-                if let Some(f) = parse_field(segment, "frame=")
-                    && let Ok(n) = f.parse::<u64>()
-                {
-                    last_frame = Some(n);
-                }
-                if let Some(t) = parse_field(segment, "time=")
-                    && let Some(secs) = parse_hms(t)
-                {
-                    last_time = Some(secs);
+            // ffmpeg writes progress as `\r`-delimited runs within a single `\n`-line
+            // (or as plain `\n`-lines when not a tty).  Split on both to be safe.
+            let mut last_frame: Option<u64> = None;
+            let mut last_time: Option<f64> = None;
+            for raw_line in reader.lines().map_while(|l| l.ok()) {
+                for segment in raw_line.split('\r') {
+                    if let Some(f) = parse_field(segment, "frame=")
+                        && let Ok(n) = f.parse::<u64>()
+                    {
+                        last_frame = Some(n);
+                    }
+                    if let Some(t) = parse_field(segment, "time=")
+                        && let Some(secs) = parse_hms(t)
+                    {
+                        last_time = Some(secs);
+                    }
                 }
             }
-        }
-        if let Some(f) = last_frame {
-            self.current_frame = f;
-        }
-        if let Some(t) = last_time {
-            self.current_time_secs = t;
+            if let Some(f) = last_frame {
+                self.current_frame = f;
+            }
+            if let Some(t) = last_time {
+                self.current_time_secs = t;
+            }
         }
 
         // For upscale jobs: count completed segments and per-segment frame progress.
@@ -563,4 +656,131 @@ fn parse_hms(s: &str) -> Option<f64> {
     let m: f64 = parts.next()?.parse().ok()?;
     let sec: f64 = parts.next()?.parse().ok()?;
     Some(h * 3600.0 + m * 60.0 + sec)
+}
+
+#[cfg(test)]
+mod reattach_tests {
+    use super::*;
+
+    fn tmp_work_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("vhs-gui-test-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn pid_alive_true_for_self() {
+        assert!(pid_alive(Pid::this()));
+    }
+
+    #[test]
+    fn pid_alive_false_for_exited_child() {
+        let mut child = Command::new("/bin/true").spawn().unwrap();
+        let status = child.wait().unwrap();
+        assert!(status.success());
+        assert!(!pid_alive(Pid::from_raw(child.id() as i32)));
+    }
+
+    #[test]
+    fn check_lock_none_when_missing() {
+        let dir = tmp_work_dir("no-lock");
+        assert!(PipelineJob::check_lock(&dir).is_none());
+    }
+
+    #[test]
+    fn check_lock_none_when_stale() {
+        let dir = tmp_work_dir("stale-lock");
+        // A pid guaranteed dead: spawn+wait, then use its former pid.
+        let mut child = Command::new("/bin/true").spawn().unwrap();
+        let dead_pid = child.id();
+        child.wait().unwrap();
+        fs::write(lock_path(&dir), dead_pid.to_string()).unwrap();
+        assert!(PipelineJob::check_lock(&dir).is_none());
+    }
+
+    #[test]
+    fn check_lock_some_when_alive() {
+        let dir = tmp_work_dir("live-lock");
+        fs::write(lock_path(&dir), Pid::this().as_raw().to_string()).unwrap();
+        assert_eq!(PipelineJob::check_lock(&dir), Some(Pid::this()));
+    }
+
+    #[test]
+    fn attach_running_poll_marks_done_when_process_exits() {
+        let dir = tmp_work_dir("attach-poll");
+        let seg_dir = dir.join("segments");
+        fs::create_dir_all(&seg_dir).unwrap();
+
+        let mut child = Command::new("/bin/true").spawn().unwrap();
+        let pgid = Pid::from_raw(child.id() as i32);
+        child.wait().unwrap(); // guaranteed dead before we poll
+
+        let mut job = PipelineJob::attach_running(
+            pgid,
+            "test",
+            Path::new("/nonexistent/input.mkv"),
+            seg_dir,
+            dir.join("out.mkv"),
+            30,
+        );
+        assert!(job.reattached);
+        assert!(!job.done);
+
+        job.poll();
+
+        assert!(job.done);
+        assert_eq!(job.exit_ok, Some(false)); // output file was never created
+    }
+
+    #[test]
+    fn attach_running_poll_stays_running_while_process_alive() {
+        let dir = tmp_work_dir("attach-alive");
+        let seg_dir = dir.join("segments");
+        fs::create_dir_all(&seg_dir).unwrap();
+
+        let mut job = PipelineJob::attach_running(
+            Pid::this(), // this test process — definitely alive
+            "test",
+            Path::new("/nonexistent/input.mkv"),
+            seg_dir,
+            dir.join("out.mkv"),
+            30,
+        );
+        job.poll();
+        assert!(!job.done);
+        assert!(job.exit_ok.is_none());
+    }
+
+    /// Regression test: a reattached job has no `script_log` (we don't know the
+    /// original log path), and `update_frame_count` used to bail out entirely
+    /// before reaching the disk-based segment count when `script_log` was
+    /// `None` — leaving `completed_segments` stuck at 0 forever even with
+    /// finished segments already on disk. Covers the exact bug reported live:
+    /// reattaching showed "0/172 segs" while 154 seg_*.mp4 files already existed.
+    #[test]
+    fn attach_running_poll_counts_existing_segments_despite_no_log() {
+        let dir = tmp_work_dir("attach-segcount");
+        let seg_dir = dir.join("segments");
+        fs::create_dir_all(&seg_dir).unwrap();
+        for i in 0..5 {
+            fs::write(seg_dir.join(format!("seg_{i:03}.mp4")), b"data").unwrap();
+        }
+        // A zero-byte segment (in-progress write) must not count as complete.
+        fs::write(seg_dir.join("seg_005.mp4"), b"").unwrap();
+
+        let mut job = PipelineJob::attach_running(
+            Pid::this(),
+            "test",
+            Path::new("/nonexistent/input.mkv"),
+            seg_dir,
+            dir.join("out.mkv"),
+            30,
+        );
+        assert_eq!(job.completed_segments, 0); // not yet polled
+
+        job.poll();
+
+        assert_eq!(job.completed_segments, 5);
+    }
 }

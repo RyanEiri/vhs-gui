@@ -475,17 +475,21 @@ impl eframe::App for App {
         });
     }
 
-    /// Called once on shutdown (window close, Cmd/Ctrl+Q, etc.). Without this,
-    /// a running job's child processes (ffmpeg, vspipe, the ROCm/Vulkan
-    /// upscale driver, or an in-progress capture) are left running after the
-    /// GUI exits — they're in their own process group so nothing reaps them.
-    /// SIGINT (not SIGKILL) matches the existing Cancel/Stop behavior: ffmpeg
-    /// finalizes its output cleanly and upscale checkpoint segments already
-    /// on disk stay valid for a later resume.
+    /// Called once on shutdown (window close, Cmd/Ctrl+Q, etc. — but also any
+    /// abnormal event-loop exit, e.g. the GL/Wayland surface becoming invalid
+    /// during a `fix-siddhartha-plasmashell` restart on display wake). We used
+    /// to `job.cancel()` an in-progress upscale here so nothing kept running
+    /// invisibly after a deliberate quit — but that made the GUI's own
+    /// stability a single point of failure for a multi-hour GPU job, and
+    /// `on_exit` can't tell a deliberate quit apart from an environmental one.
+    /// Upscale jobs are already `.process_group(0)`-isolated and
+    /// checkpoint-resumable, and now write a pgid lock file
+    /// (`with_upscale_tracking`) so a later vhs-gui process can find and
+    /// reattach to a job that outlived its GUI (see `check_lock`/
+    /// `attach_running` in pipeline.rs) — so leaving it running is strictly
+    /// safer than guessing wrong and killing hours of work. If the user wants
+    /// it stopped, Cancel/Stop-after-Segment in the UI still do that explicitly.
     fn on_exit(&mut self, _gl: Option<&glow::Context>) {
-        if let Some(job) = self.upscale.pipeline_job() {
-            job.cancel();
-        }
         if self.monitor.capture.is_running() {
             self.monitor.capture.stop();
         }
