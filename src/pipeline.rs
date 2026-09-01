@@ -1,7 +1,9 @@
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
 use nix::unistd::Pid;
@@ -65,6 +67,30 @@ pub struct PipelineJob {
     /// we found its lock file (see `attach_running`) and we only observe it
     /// (segment/frame counts on disk, pgid liveness), never `child.try_wait()`.
     reattached: bool,
+    /// Set for a `start_native_sequence` job: a chain of independent
+    /// processes run one after another in a background thread (e.g. ffmpeg
+    /// extract -> sox notch -> sox noisered -> ffmpeg remux). `None` for
+    /// every other job shape.
+    seq: Option<Arc<SeqShared>>,
+}
+
+/// Shared state a `start_native_sequence` background thread reports through,
+/// polled once per frame by `poll()` — the same "check state, don't be
+/// pushed to" model `reattached` jobs already use for a pgid.
+struct SeqShared {
+    /// pid of whichever step is currently running, so `cancel()` can signal
+    /// it directly (no pgid we own ahead of spawning it, unlike bash/pipe
+    /// jobs where `.process_group(0)` makes the child pid the group leader
+    /// we already know before the user could click Cancel).
+    current_pid: Mutex<Option<i32>>,
+    cancel_requested: AtomicBool,
+    /// `None` while running; `Some(true/false)` once the sequence finishes.
+    done: Mutex<Option<bool>>,
+    /// Human-readable label for whichever step is currently running (e.g.
+    /// "Notching hum...") — the UI shows this instead of frame/time text,
+    /// which would otherwise show stale/meaningless data from whichever
+    /// ffmpeg substage happened to log last.
+    stage: Mutex<String>,
 }
 
 /// `vhs_upscale.sh` already writes its own pgid here at startup and removes it
@@ -175,6 +201,7 @@ fn base_job(prep: SpawnPrep, child: Child, aux_child: Option<Child>, pgid: Pid) 
         paused: false,
         stop_after_segment_at: None,
         reattached: false,
+        seq: None,
     }
 }
 
@@ -320,6 +347,7 @@ impl PipelineJob {
             paused: false,
             stop_after_segment_at: None,
             reattached: true,
+            seq: None,
         }
     }
 
@@ -344,6 +372,149 @@ impl PipelineJob {
         let child = cmd.spawn()?;
         let pgid = Pid::from_raw(child.id() as i32);
         Ok(base_job(prep, child, None, pgid))
+    }
+
+    /// Spawn a sequential chain of independent processes (e.g. ffmpeg
+    /// extract -> sox notch -> sox noisered -> ffmpeg remux), run one after
+    /// another in a background thread. Unlike every other constructor here,
+    /// there's no single `Child` for `poll()`/`cancel()` to hold — the
+    /// thread reports through `SeqShared`, checked once per frame the same
+    /// way a `reattached` job's pgid is checked.
+    ///
+    /// `steps` is `(stage label, command)` pairs, run in order; each one's
+    /// stdout/stderr is appended to the job's log file with a `=== label
+    /// ===` marker. A non-zero exit or a `cancel()` call stops the chain
+    /// before the next step starts. `work_dir`, if given, is removed when
+    /// the chain finishes (success, failure, or cancel) — the Rust
+    /// equivalent of the bash scripts' `trap cleanup EXIT`.
+    pub fn start_native_sequence(
+        label: impl Into<String>,
+        input: &Path,
+        steps: Vec<(&'static str, Command)>,
+        work_dir: Option<PathBuf>,
+        log_dir: &Path,
+    ) -> anyhow::Result<Self> {
+        let prep = prepare_spawn(label, input, log_dir)?;
+
+        let shared = Arc::new(SeqShared {
+            current_pid: Mutex::new(None),
+            cancel_requested: AtomicBool::new(false),
+            done: Mutex::new(None),
+            stage: Mutex::new(String::new()),
+        });
+
+        let thread_shared = Arc::clone(&shared);
+        let mut log_file = prep.log_file.try_clone()?;
+        let full_path = prep.full_path.clone();
+        std::thread::spawn(move || {
+            let mut ok = true;
+            for (stage_label, mut cmd) in steps {
+                if thread_shared.cancel_requested.load(Ordering::SeqCst) {
+                    ok = false;
+                    break;
+                }
+                *thread_shared.stage.lock().unwrap() = stage_label.to_string();
+                let _ = writeln!(log_file, "=== {stage_label} ===");
+                let _ = log_file.flush();
+
+                let log_out = match log_file.try_clone() {
+                    Ok(f) => f,
+                    Err(_) => {
+                        ok = false;
+                        break;
+                    }
+                };
+                let log_err = match log_file.try_clone() {
+                    Ok(f) => f,
+                    Err(_) => {
+                        ok = false;
+                        break;
+                    }
+                };
+                cmd.stdin(Stdio::null())
+                    .stdout(Stdio::from(log_out))
+                    .stderr(Stdio::from(log_err))
+                    .env("PATH", &full_path);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::CommandExt as _;
+                    cmd.process_group(0);
+                }
+
+                let mut child = match cmd.spawn() {
+                    Ok(c) => c,
+                    Err(_) => {
+                        ok = false;
+                        break;
+                    }
+                };
+                *thread_shared.current_pid.lock().unwrap() = Some(child.id() as i32);
+
+                let status = child.wait();
+                *thread_shared.current_pid.lock().unwrap() = None;
+
+                if thread_shared.cancel_requested.load(Ordering::SeqCst) {
+                    ok = false;
+                    break;
+                }
+                match status {
+                    Ok(s) if s.success() => {}
+                    _ => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if let Some(dir) = work_dir {
+                let _ = fs::remove_dir_all(dir);
+            }
+            *thread_shared.done.lock().unwrap() = Some(ok);
+        });
+
+        Ok(PipelineJob {
+            child: None,
+            aux_child: None,
+            pgid: Pid::this(),
+            exit_ok: None,
+            label: prep.label_str,
+            done: false,
+            current_frame: 0,
+            total_frames: 0,
+            current_time_secs: 0.0,
+            // Forced to 0 (not `prep.total_duration_secs`): a multi-stage
+            // sequence has no single ffmpeg progress stream to divide by a
+            // duration, so `progress()` must return `None` here to get the
+            // UI's existing pulsing "unknown progress" bar instead of a
+            // falsely-stuck-at-0% one.
+            total_duration_secs: 0.0,
+            script_log: Some(prep.log_path),
+            started_at: Instant::now(),
+            is_upscale: false,
+            segments_dir: None,
+            frames_dir: None,
+            frames_up_dir: None,
+            completed_segments: 0,
+            total_segments: 0,
+            upscaled_frames: 0,
+            segment_frames: 0,
+            output_path: None,
+            paused: false,
+            stop_after_segment_at: None,
+            reattached: false,
+            seq: Some(shared),
+        })
+    }
+
+    /// Label of whichever step a `start_native_sequence` job is currently
+    /// running (e.g. "Notching hum..."). `None` for every other job shape.
+    pub fn stage_text(&self) -> Option<String> {
+        let seq = self.seq.as_ref()?;
+        let stage = seq.stage.lock().unwrap();
+        if stage.is_empty() {
+            None
+        } else {
+            Some(stage.clone())
+        }
     }
 
     /// Non-blocking poll: check child exit and tail the script's own log for
@@ -391,6 +562,13 @@ impl PipelineJob {
             // same convention every job already uses in the absence of an exit code.
             if !pid_alive(self.pgid) {
                 self.exit_ok = Some(self.output_path.as_ref().is_some_and(|p| p.exists()));
+                self.done = true;
+            }
+        } else if let Some(ref seq) = self.seq {
+            // No Child handle either — the background thread reports through
+            // `SeqShared`, checked once per frame like a reattached pgid is.
+            if let Some(ok) = *seq.done.lock().unwrap() {
+                self.exit_ok = Some(ok);
                 self.done = true;
             }
         } else {
@@ -490,6 +668,17 @@ impl PipelineJob {
         if self.child.is_some() || self.reattached {
             use nix::sys::signal::{Signal, killpg};
             let _ = killpg(self.pgid, Signal::SIGINT);
+        } else if let Some(ref seq) = self.seq {
+            // No pgid we own ahead of spawning each step (unlike bash/pipe
+            // jobs, where `.process_group(0)` makes the child pid the group
+            // leader we already know before the user could click Cancel) —
+            // signal whichever step's pid is currently recorded, and stop
+            // the chain from starting its next step.
+            seq.cancel_requested.store(true, Ordering::SeqCst);
+            if let Some(pid) = *seq.current_pid.lock().unwrap() {
+                use nix::sys::signal::{Signal, kill};
+                let _ = kill(Pid::from_raw(pid), Signal::SIGINT);
+            }
         }
     }
 

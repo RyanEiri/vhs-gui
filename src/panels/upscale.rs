@@ -698,6 +698,26 @@ impl UpscalePanel {
         }
     }
 
+    /// Launch native audio cleanup (hum notch + noisered). Output is written
+    /// beside the input, keeping `library.rs`'s VD classification intact —
+    /// see `audio_cleanup::output_path`'s doc comment.
+    fn launch_audio_cleanup(&mut self, input: PathBuf, cfg: &Config, status: &mut String) {
+        let output = crate::audio_cleanup::output_path(&input);
+        let name = input
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("input")
+            .to_string();
+        match crate::audio_cleanup::launch(&input, &output, cfg, format!("Audio Cleanup {name}")) {
+            Ok(mut job) => {
+                job.output_path = Some(output);
+                *status = format!("Started: {}", job.label);
+                self.pipeline = Some(job);
+            }
+            Err(e) => *status = format!("Failed to start job: {e}"),
+        }
+    }
+
     fn upscale_output(input: &std::path::Path, cfg: &Config) -> PathBuf {
         let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
         let clean = stem.strip_suffix(".viewer").unwrap_or(stem);
@@ -900,6 +920,9 @@ impl UpscalePanel {
                         if ui.button("Fix A/V Sync").clicked() {
                             self.launch_fix_sync(entry.path.clone(), cfg, status);
                         }
+                        if ui.button("Audio Cleanup").clicked() {
+                            self.launch_audio_cleanup(entry.path.clone(), cfg, status);
+                        }
                     }
                     FileKind::EditMasterVD => {
                         if ui.button("Viewer Encode").clicked() {
@@ -949,6 +972,9 @@ impl UpscalePanel {
                         if ui.button("Fix A/V Sync").clicked() {
                             self.launch_fix_sync(entry.path.clone(), cfg, status);
                         }
+                        if ui.button("Audio Cleanup").clicked() {
+                            self.launch_audio_cleanup(entry.path.clone(), cfg, status);
+                        }
                     }
                     FileKind::Viewer => {
                         if ui.button("Upscale").clicked() {
@@ -986,6 +1012,9 @@ impl UpscalePanel {
                         }
                         if ui.button("Fix A/V Sync").clicked() {
                             self.launch_fix_sync(entry.path.clone(), cfg, status);
+                        }
+                        if ui.button("Audio Cleanup").clicked() {
+                            self.launch_audio_cleanup(entry.path.clone(), cfg, status);
                         }
                     }
                 }
@@ -1122,7 +1151,13 @@ impl UpscalePanel {
                 ui.add(egui::ProgressBar::new(fill).animate(true));
             }
 
-            let frame_txt = if job.is_upscale {
+            // A start_native_sequence job (e.g. Audio Cleanup) has no single
+            // ffmpeg progress stream — frame/time numbers below would be
+            // stale/meaningless leftovers from whichever substage happened
+            // to log last, so show its current stage label instead.
+            let frame_txt = if let Some(stage) = job.stage_text() {
+                format!("{stage}  {}", job.elapsed_str())
+            } else if job.is_upscale {
                 format!(
                     "frame {} / {}  {}",
                     job.upscaled_frames,
