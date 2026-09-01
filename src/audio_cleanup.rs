@@ -20,9 +20,47 @@ const FFMPEG: &str = "/usr/bin/ffmpeg";
 const SOX: &str = "/usr/bin/sox";
 
 const HUM_HZ: u32 = 60;
-const NR_AMOUNT: &str = "0.25";
 const NORM_DB: &str = "-1";
-const NOISE_T: &str = "00:00:01.0";
+
+/// Tunable knobs, surfaced in the GUI rather than hardcoded (see
+/// `panels/upscale.rs`'s Audio Cleanup inline panel). The *fixed* default
+/// noise-sample window (0:00, 1.0s) turned out to be a real problem on tapes
+/// with no quiet lead-in: if program audio starts immediately, `noiseprof`
+/// captures dialogue/music as "noise" and `noisered` then suppresses similar
+/// content throughout the whole file, producing muffled/artifacty audio
+/// rather than actually cleaning anything up. `noise_start_secs` lets the
+/// user point the sample at an actual quiet spot on that specific tape.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Params {
+    pub hum_enable: bool,
+    pub noise_start_secs: f64,
+    pub noise_len_secs: f64,
+    pub nr_amount: f64,
+}
+
+impl Default for Params {
+    fn default() -> Self {
+        Self {
+            hum_enable: true,
+            noise_start_secs: 0.0,
+            noise_len_secs: 1.0,
+            // Bash script default; found to sound harsh/gate-y on complex
+            // program material (voice+music) when the noise profile is even
+            // slightly contaminated by real content -- lowered here so the
+            // GUI's out-of-the-box result errs gentle. Raise it once the
+            // noise-sample window is confirmed to be genuinely quiet.
+            nr_amount: 0.15,
+        }
+    }
+}
+
+fn hhmmss(secs: f64) -> String {
+    let secs = secs.max(0.0);
+    let h = (secs / 3600.0) as u64;
+    let m = ((secs % 3600.0) / 60.0) as u64;
+    let s = secs % 60.0;
+    format!("{h:02}:{m:02}:{s:05.2}")
+}
 
 fn af_chain() -> String {
     "highpass=f=20,aresample=async=0:first_pts=0,asetpts=N/SR/TB".to_string()
@@ -66,12 +104,13 @@ fn unique_work_dir() -> PathBuf {
     std::env::temp_dir().join(format!("vhs-gui-audiocleanup-{}-{ts}", std::process::id()))
 }
 
-/// Build the 6-stage pipeline and hand it to `PipelineJob::start_native_sequence`.
+/// Build the stage pipeline and hand it to `PipelineJob::start_native_sequence`.
 pub fn launch(
     input: &Path,
     output: &Path,
     cfg: &Config,
     label: String,
+    params: &Params,
 ) -> anyhow::Result<PipelineJob> {
     if !Path::new(FFMPEG).is_file() {
         anyhow::bail!("ffmpeg not found: {FFMPEG}");
@@ -117,23 +156,14 @@ pub fn launch(
         ])
         .arg(&full_wav);
 
-    let mut hum_notch = Command::new(SOX);
-    hum_notch.arg(&full_wav).arg(&hum_wav).args([
-        "bandreject",
-        &HUM_HZ.to_string(),
-        "2q",
-        "bandreject",
-        &(HUM_HZ * 2).to_string(),
-        "2q",
-        "bandreject",
-        &(HUM_HZ * 3).to_string(),
-        "2q",
-    ]);
+    let noise_ss = hhmmss(params.noise_start_secs);
+    let noise_t = hhmmss(params.noise_len_secs);
+    let nr_amount = params.nr_amount.to_string();
 
     let mut extract_sample = Command::new(FFMPEG);
     extract_sample
         .args(["-hide_banner", "-nostdin", "-y", "-fflags", "+genpts"])
-        .args(["-ss", "00:00:00", "-t", NOISE_T, "-i"])
+        .args(["-ss", &noise_ss, "-t", &noise_t, "-i"])
         .arg(input)
         .args(["-vn", "-map", "0:a:0", "-af"])
         .arg(&af)
@@ -154,14 +184,6 @@ pub fn launch(
         .arg(&sample_wav)
         .args(["-n", "noiseprof"])
         .arg(&noise_prof);
-
-    let mut noisered = Command::new(SOX);
-    noisered
-        .arg(&hum_wav)
-        .arg(&clean_wav)
-        .arg("noisered")
-        .arg(&noise_prof)
-        .arg(NR_AMOUNT);
 
     let mut norm = Command::new(SOX);
     norm.arg(&clean_wav).arg(&norm_wav).args(["norm", NORM_DB]);
@@ -185,15 +207,42 @@ pub fn launch(
         .args(["-avoid_negative_ts", "make_zero", "-shortest"])
         .arg(output);
 
-    let steps: Vec<(&'static str, Command)> = vec![
-        ("Extracting audio...", extract_full),
-        ("Notching hum...", hum_notch),
-        ("Sampling noise profile...", extract_sample),
-        ("Building noise profile...", noiseprof),
-        ("Reducing broadband noise...", noisered),
-        ("Normalizing...", norm),
-        ("Remuxing...", remux),
-    ];
+    // The hum-notch stage is skipped entirely (not just a no-op) when
+    // disabled, so noisered/norm run against `full_wav` directly and no
+    // notch-specific sox invocation exists to report/log.
+    let mut steps: Vec<(&'static str, Command)> = vec![("Extracting audio...", extract_full)];
+    let noisered_input = if params.hum_enable {
+        let mut hum_notch = Command::new(SOX);
+        hum_notch.arg(&full_wav).arg(&hum_wav).args([
+            "bandreject",
+            &HUM_HZ.to_string(),
+            "2q",
+            "bandreject",
+            &(HUM_HZ * 2).to_string(),
+            "2q",
+            "bandreject",
+            &(HUM_HZ * 3).to_string(),
+            "2q",
+        ]);
+        steps.push(("Notching hum...", hum_notch));
+        hum_wav
+    } else {
+        full_wav.clone()
+    };
+
+    let mut noisered = Command::new(SOX);
+    noisered
+        .arg(&noisered_input)
+        .arg(&clean_wav)
+        .arg("noisered")
+        .arg(&noise_prof)
+        .arg(&nr_amount);
+
+    steps.push(("Sampling noise profile...", extract_sample));
+    steps.push(("Building noise profile...", noiseprof));
+    steps.push(("Reducing broadband noise...", noisered));
+    steps.push(("Normalizing...", norm));
+    steps.push(("Remuxing...", remux));
 
     PipelineJob::start_native_sequence(label, input, steps, Some(work_dir), &cfg.log_dir())
 }
@@ -241,10 +290,23 @@ mod tests {
     }
 
     #[test]
-    fn defaults_match_bash_script() {
-        assert_eq!(NR_AMOUNT, "0.25");
+    fn defaults_match_bash_script_except_gentler_nr_amount() {
+        // NORM_DB and the noise-sample window shape still match
+        // vhs_audio_cleanup.sh exactly. NR_AMOUNT is intentionally lower
+        // than the bash script's 0.25 -- see Params::default's doc comment.
         assert_eq!(NORM_DB, "-1");
-        assert_eq!(NOISE_T, "00:00:01.0");
+        assert_eq!(Params::default().nr_amount, 0.15);
+        assert_eq!(Params::default().noise_start_secs, 0.0);
+        assert_eq!(Params::default().noise_len_secs, 1.0);
+        assert!(Params::default().hum_enable);
+    }
+
+    #[test]
+    fn hhmmss_formats_for_ffmpeg_ss() {
+        assert_eq!(hhmmss(0.0), "00:00:00.00");
+        assert_eq!(hhmmss(1.0), "00:00:01.00");
+        assert_eq!(hhmmss(90.5), "00:01:30.50");
+        assert_eq!(hhmmss(3661.25), "01:01:01.25");
     }
 
     /// End-to-end smoke test against a synthetic input with a delayed 60Hz
@@ -343,8 +405,14 @@ mod tests {
         );
 
         let output = dir.join("clean.mkv");
-        let mut job = launch(&noisy, &output, &cfg, "smoke-test audio_cleanup".into())
-            .expect("launch failed");
+        let mut job = launch(
+            &noisy,
+            &output,
+            &cfg,
+            "smoke-test audio_cleanup".into(),
+            &Params::default(),
+        )
+        .expect("launch failed");
 
         for _ in 0..200 {
             job.poll();

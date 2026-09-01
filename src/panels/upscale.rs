@@ -25,6 +25,8 @@ pub struct UpscalePanel {
     pipeline: Option<PipelineJob>,
     confirm_delete: Option<PathBuf>,
     rename_state: Option<(PathBuf, String)>,
+    /// File the inline Audio Cleanup panel is open for, and its params.
+    audio_cleanup_state: Option<(PathBuf, crate::audio_cleanup::Params)>,
     last_preview_at: Option<std::time::Instant>,
     last_preview_frames: u64,
     preview_textures: Option<UpscalePreviewTextures>,
@@ -41,6 +43,7 @@ impl UpscalePanel {
             pipeline: None,
             confirm_delete: None,
             rename_state: None,
+            audio_cleanup_state: None,
             last_preview_at: None,
             last_preview_frames: 0,
             preview_textures: None,
@@ -698,17 +701,29 @@ impl UpscalePanel {
         }
     }
 
-    /// Launch native audio cleanup (hum notch + noisered). Output is written
-    /// beside the input, keeping `library.rs`'s VD classification intact —
-    /// see `audio_cleanup::output_path`'s doc comment.
-    fn launch_audio_cleanup(&mut self, input: PathBuf, cfg: &Config, status: &mut String) {
+    /// Launch native audio cleanup (hum notch + noisered) with the given
+    /// params. Output is written beside the input, keeping `library.rs`'s VD
+    /// classification intact — see `audio_cleanup::output_path`'s doc comment.
+    fn launch_audio_cleanup(
+        &mut self,
+        input: PathBuf,
+        params: &crate::audio_cleanup::Params,
+        cfg: &Config,
+        status: &mut String,
+    ) {
         let output = crate::audio_cleanup::output_path(&input);
         let name = input
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or("input")
             .to_string();
-        match crate::audio_cleanup::launch(&input, &output, cfg, format!("Audio Cleanup {name}")) {
+        match crate::audio_cleanup::launch(
+            &input,
+            &output,
+            cfg,
+            format!("Audio Cleanup {name}"),
+            params,
+        ) {
             Ok(mut job) => {
                 job.output_path = Some(output);
                 *status = format!("Started: {}", job.label);
@@ -827,8 +842,10 @@ impl UpscalePanel {
         ui.separator();
         ui.label(egui::RichText::new(&entry.name).small().weak());
 
-        let busy =
-            self.pipeline.is_some() || self.confirm_delete.is_some() || self.rename_state.is_some();
+        let busy = self.pipeline.is_some()
+            || self.confirm_delete.is_some()
+            || self.rename_state.is_some()
+            || self.audio_cleanup_state.is_some();
 
         ui.add_enabled_ui(!busy, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -920,8 +937,9 @@ impl UpscalePanel {
                         if ui.button("Fix A/V Sync").clicked() {
                             self.launch_fix_sync(entry.path.clone(), cfg, status);
                         }
-                        if ui.button("Audio Cleanup").clicked() {
-                            self.launch_audio_cleanup(entry.path.clone(), cfg, status);
+                        if ui.button("Audio Cleanup...").clicked() {
+                            self.audio_cleanup_state =
+                                Some((entry.path.clone(), crate::audio_cleanup::Params::default()));
                         }
                     }
                     FileKind::EditMasterVD => {
@@ -972,8 +990,9 @@ impl UpscalePanel {
                         if ui.button("Fix A/V Sync").clicked() {
                             self.launch_fix_sync(entry.path.clone(), cfg, status);
                         }
-                        if ui.button("Audio Cleanup").clicked() {
-                            self.launch_audio_cleanup(entry.path.clone(), cfg, status);
+                        if ui.button("Audio Cleanup...").clicked() {
+                            self.audio_cleanup_state =
+                                Some((entry.path.clone(), crate::audio_cleanup::Params::default()));
                         }
                     }
                     FileKind::Viewer => {
@@ -1013,8 +1032,9 @@ impl UpscalePanel {
                         if ui.button("Fix A/V Sync").clicked() {
                             self.launch_fix_sync(entry.path.clone(), cfg, status);
                         }
-                        if ui.button("Audio Cleanup").clicked() {
-                            self.launch_audio_cleanup(entry.path.clone(), cfg, status);
+                        if ui.button("Audio Cleanup...").clicked() {
+                            self.audio_cleanup_state =
+                                Some((entry.path.clone(), crate::audio_cleanup::Params::default()));
                         }
                     }
                 }
@@ -1114,6 +1134,81 @@ impl UpscalePanel {
             }
             Some(Err(())) => {
                 self.rename_state = None;
+            }
+            None => {}
+        }
+
+        // Audio Cleanup UI (two-pass borrow pattern, same shape as Rename)
+        let audio_cleanup_action: Option<Result<crate::audio_cleanup::Params, ()>> =
+            if let Some((ref orig, ref mut params)) = self.audio_cleanup_state {
+                if orig == &entry.path {
+                    ui.separator();
+                    ui.label(egui::RichText::new("Audio Cleanup").small().weak());
+                    egui::Grid::new("audio_cleanup_grid")
+                        .num_columns(2)
+                        .spacing([8.0, 4.0])
+                        .show(ui, |ui| {
+                            ui.label("Noise sample start (s)");
+                            ui.add(
+                                egui::DragValue::new(&mut params.noise_start_secs)
+                                    .range(0.0..=f64::MAX)
+                                    .speed(0.1),
+                            );
+                            ui.end_row();
+
+                            ui.label("Noise sample length (s)");
+                            ui.add(
+                                egui::DragValue::new(&mut params.noise_len_secs)
+                                    .range(0.1..=10.0)
+                                    .speed(0.1),
+                            );
+                            ui.end_row();
+
+                            ui.label("Noise reduction amount");
+                            ui.add(
+                                egui::DragValue::new(&mut params.nr_amount)
+                                    .range(0.0..=1.0)
+                                    .speed(0.01),
+                            );
+                            ui.end_row();
+
+                            ui.label("Hum notch (60Hz)");
+                            ui.checkbox(&mut params.hum_enable, "");
+                            ui.end_row();
+                        });
+                    ui.label(
+                        egui::RichText::new(
+                            "Tip: point the sample start at an actual quiet spot on this \
+                             tape -- a wrong window (e.g. dialogue starting at 0:00) makes \
+                             cleanup worse, not better.",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                    let mut action = None;
+                    ui.horizontal(|ui| {
+                        if ui.button("▶ Run").clicked() {
+                            action = Some(Ok(params.clone()));
+                        }
+                        if ui.button("✗ Cancel").clicked() {
+                            action = Some(Err(()));
+                        }
+                    });
+                    action
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+        match audio_cleanup_action {
+            Some(Ok(params)) => {
+                self.audio_cleanup_state = None;
+                self.launch_audio_cleanup(entry.path.clone(), &params, cfg, status);
+            }
+            Some(Err(())) => {
+                self.audio_cleanup_state = None;
             }
             None => {}
         }
