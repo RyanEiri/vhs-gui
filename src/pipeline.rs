@@ -93,6 +93,108 @@ struct SeqShared {
     stage: Mutex<String>,
 }
 
+/// One step in a `start_native_sequence` chain.
+///
+/// `Cmd` covers the common case: run this command, wait for it. `Fn` is for
+/// a step whose command can't be built up front because it depends on a
+/// previous step's *output* (not just an output file — e.g. ffmpeg
+/// `loudnorm`'s two-pass measure-then-apply, where pass 2's args are parsed
+/// from pass 1's JSON summary on stderr). The closure gets a `SeqCtx` to run
+/// its own subprocess(es) through the same pid-tracking/cancel-aware/log-
+/// writing machinery a `Cmd` step uses, and returns whether it succeeded.
+pub enum SeqStep {
+    Cmd(Command),
+    Fn(Box<dyn FnOnce(&SeqCtx) -> bool + Send>),
+}
+
+/// Handle a `SeqStep::Fn` closure uses to run its own subprocess(es) with
+/// the same pid-tracking (so `cancel()` still works mid-closure), log
+/// redirection, and PATH env as a plain `Cmd` step.
+pub struct SeqCtx {
+    shared: Arc<SeqShared>,
+    log_file: std::fs::File,
+    full_path: String,
+}
+
+impl SeqCtx {
+    fn prep_command(&self, cmd: &mut Command) {
+        cmd.env("PATH", &self.full_path);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            cmd.process_group(0);
+        }
+    }
+
+    /// True if `cancel()` was called — closures doing multi-step work of
+    /// their own (like a two-pass loudnorm) should check this between
+    /// passes, same as the outer loop does between `SeqStep`s.
+    pub fn cancelled(&self) -> bool {
+        self.shared.cancel_requested.load(Ordering::SeqCst)
+    }
+
+    /// Run `cmd` to completion, stdout/stderr redirected to the job's log
+    /// file (with pid tracked for `cancel()` while it runs). Returns
+    /// success. This is exactly what a plain `Cmd` step does internally.
+    pub fn run(&self, mut cmd: Command) -> bool {
+        self.prep_command(&mut cmd);
+        let (log_out, log_err) = match (self.log_file.try_clone(), self.log_file.try_clone()) {
+            (Ok(o), Ok(e)) => (o, e),
+            _ => return false,
+        };
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::from(log_out))
+            .stderr(Stdio::from(log_err));
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        *self.shared.current_pid.lock().unwrap() = Some(child.id() as i32);
+        let status = child.wait();
+        *self.shared.current_pid.lock().unwrap() = None;
+        if self.cancelled() {
+            return false;
+        }
+        matches!(status, Ok(s) if s.success())
+    }
+
+    /// Same as `run`, but also captures stdout+stderr as text (still also
+    /// written to the log file) for a step that needs to parse a
+    /// subprocess's own output — e.g. loudnorm's `print_format=json`
+    /// summary, which ffmpeg writes to stderr.
+    pub fn run_captured(&self, mut cmd: Command) -> (bool, String) {
+        self.prep_command(&mut cmd);
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(_) => return (false, String::new()),
+        };
+        *self.shared.current_pid.lock().unwrap() = Some(child.id() as i32);
+        let output = child.wait_with_output();
+        *self.shared.current_pid.lock().unwrap() = None;
+
+        let Ok(output) = output else {
+            return (false, String::new());
+        };
+        let mut log_file = self.log_file.try_clone().ok();
+        if let Some(f) = log_file.as_mut() {
+            let _ = f.write_all(&output.stdout);
+            let _ = f.write_all(&output.stderr);
+        }
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if self.cancelled() {
+            return (false, text);
+        }
+        (output.status.success(), text)
+    }
+}
+
 /// `vhs_upscale.sh` already writes its own pgid here at startup and removes it
 /// via `trap ... EXIT` — reuse that instead of a second, Rust-only lock file.
 /// Used to detect a job still running from a previous vhs-gui process (see
@@ -381,16 +483,17 @@ impl PipelineJob {
     /// thread reports through `SeqShared`, checked once per frame the same
     /// way a `reattached` job's pgid is checked.
     ///
-    /// `steps` is `(stage label, command)` pairs, run in order; each one's
-    /// stdout/stderr is appended to the job's log file with a `=== label
-    /// ===` marker. A non-zero exit or a `cancel()` call stops the chain
-    /// before the next step starts. `work_dir`, if given, is removed when
-    /// the chain finishes (success, failure, or cancel) — the Rust
-    /// equivalent of the bash scripts' `trap cleanup EXIT`.
+    /// `steps` is `(stage label, step)` pairs, run in order — see `SeqStep`
+    /// for the `Cmd` vs `Fn` distinction. Each step's stdout/stderr is
+    /// appended to the job's log file with a `=== label ===` marker. A
+    /// non-zero exit or a `cancel()` call stops the chain before the next
+    /// step starts. `work_dir`, if given, is removed when the chain
+    /// finishes (success, failure, or cancel) — the Rust equivalent of the
+    /// bash scripts' `trap cleanup EXIT`.
     pub fn start_native_sequence(
         label: impl Into<String>,
         input: &Path,
-        steps: Vec<(&'static str, Command)>,
+        steps: Vec<(&'static str, SeqStep)>,
         work_dir: Option<PathBuf>,
         log_dir: &Path,
     ) -> anyhow::Result<Self> {
@@ -408,7 +511,7 @@ impl PipelineJob {
         let full_path = prep.full_path.clone();
         std::thread::spawn(move || {
             let mut ok = true;
-            for (stage_label, mut cmd) in steps {
+            for (stage_label, step) in steps {
                 if thread_shared.cancel_requested.load(Ordering::SeqCst) {
                     ok = false;
                     break;
@@ -417,52 +520,25 @@ impl PipelineJob {
                 let _ = writeln!(log_file, "=== {stage_label} ===");
                 let _ = log_file.flush();
 
-                let log_out = match log_file.try_clone() {
+                let ctx_log = match log_file.try_clone() {
                     Ok(f) => f,
                     Err(_) => {
                         ok = false;
                         break;
                     }
                 };
-                let log_err = match log_file.try_clone() {
-                    Ok(f) => f,
-                    Err(_) => {
-                        ok = false;
-                        break;
-                    }
+                let ctx = SeqCtx {
+                    shared: Arc::clone(&thread_shared),
+                    log_file: ctx_log,
+                    full_path: full_path.clone(),
                 };
-                cmd.stdin(Stdio::null())
-                    .stdout(Stdio::from(log_out))
-                    .stderr(Stdio::from(log_err))
-                    .env("PATH", &full_path);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::process::CommandExt as _;
-                    cmd.process_group(0);
-                }
-
-                let mut child = match cmd.spawn() {
-                    Ok(c) => c,
-                    Err(_) => {
-                        ok = false;
-                        break;
-                    }
+                let step_ok = match step {
+                    SeqStep::Cmd(cmd) => ctx.run(cmd),
+                    SeqStep::Fn(f) => f(&ctx),
                 };
-                *thread_shared.current_pid.lock().unwrap() = Some(child.id() as i32);
-
-                let status = child.wait();
-                *thread_shared.current_pid.lock().unwrap() = None;
-
-                if thread_shared.cancel_requested.load(Ordering::SeqCst) {
+                if !step_ok {
                     ok = false;
                     break;
-                }
-                match status {
-                    Ok(s) if s.success() => {}
-                    _ => {
-                        ok = false;
-                        break;
-                    }
                 }
             }
             if let Some(dir) = work_dir {

@@ -14,13 +14,20 @@ use std::process::Command;
 use std::time::SystemTime;
 
 use crate::config::Config;
-use crate::pipeline::PipelineJob;
+use crate::pipeline::{PipelineJob, SeqCtx, SeqStep};
 
 const FFMPEG: &str = "/usr/bin/ffmpeg";
 const SOX: &str = "/usr/bin/sox";
 
 const HUM_HZ: u32 = 60;
-const NORM_DB: &str = "-1";
+
+// loudnorm true-peak ceiling and loudness-range target: fixed, not exposed
+// as knobs (TP=-1.5 leaves headroom for lossy re-encodes downstream; LRA=11
+// is ffmpeg's own documented default). Only the integrated-loudness target
+// is user-facing (`Params::loudnorm_target_i`) since that's the one that
+// actually controls "how loud."
+const LOUDNORM_TP: &str = "-1.5";
+const LOUDNORM_LRA: &str = "11";
 
 /// Tunable knobs, surfaced in the GUI rather than hardcoded (see
 /// `panels/upscale.rs`'s Audio Cleanup inline panel). The *fixed* default
@@ -36,6 +43,15 @@ pub struct Params {
     pub noise_start_secs: f64,
     pub noise_len_secs: f64,
     pub nr_amount: f64,
+    /// Integrated loudness target in LUFS for the final normalization pass
+    /// (ffmpeg `loudnorm`, two-pass). Replaces the old fixed `sox norm -1`
+    /// (peak-only: boosts the whole file by one gain factor so the single
+    /// loudest moment hits -1dB, which leaves quiet passages quiet relative
+    /// to it — measured -37dB to -15dB across one real clip after norm).
+    /// loudnorm instead targets consistent *perceived* loudness throughout.
+    /// -16 LUFS is a standard target for spoken-word/podcast content; music
+    /// or a tape with wider dynamic range may want it lower (e.g. -20).
+    pub loudnorm_target_i: f64,
 }
 
 impl Default for Params {
@@ -50,8 +66,25 @@ impl Default for Params {
             // GUI's out-of-the-box result errs gentle. Raise it once the
             // noise-sample window is confirmed to be genuinely quiet.
             nr_amount: 0.15,
+            loudnorm_target_i: -16.0,
         }
     }
+}
+
+/// Pull `"key" : "value"` out of ffmpeg loudnorm's `print_format=json`
+/// summary (written to stderr). Hand-rolled rather than pulling in a JSON
+/// dependency for one fixed, well-known output shape — same spirit as this
+/// codebase's other small manual parsers (`pipeline.rs`'s `parse_field`/
+/// `parse_hms`, `fix_sync.rs`'s ffprobe field parsing).
+fn extract_json_field(text: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\"");
+    let idx = text.find(&needle)?;
+    let rest = &text[idx + needle.len()..];
+    let rest = &rest[rest.find(':')? + 1..];
+    let start = rest.find('"')? + 1;
+    let rest = &rest[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }
 
 fn hhmmss(secs: f64) -> String {
@@ -185,9 +218,6 @@ pub fn launch(
         .args(["-n", "noiseprof"])
         .arg(&noise_prof);
 
-    let mut norm = Command::new(SOX);
-    norm.arg(&clean_wav).arg(&norm_wav).args(["norm", NORM_DB]);
-
     let mut remux = Command::new(FFMPEG);
     remux
         .args(["-hide_banner", "-nostdin", "-y", "-fflags", "+genpts", "-i"])
@@ -208,9 +238,10 @@ pub fn launch(
         .arg(output);
 
     // The hum-notch stage is skipped entirely (not just a no-op) when
-    // disabled, so noisered/norm run against `full_wav` directly and no
+    // disabled, so noisered runs against `full_wav` directly and no
     // notch-specific sox invocation exists to report/log.
-    let mut steps: Vec<(&'static str, Command)> = vec![("Extracting audio...", extract_full)];
+    let mut steps: Vec<(&'static str, SeqStep)> =
+        vec![("Extracting audio...", SeqStep::Cmd(extract_full))];
     let noisered_input = if params.hum_enable {
         let mut hum_notch = Command::new(SOX);
         hum_notch.arg(&full_wav).arg(&hum_wav).args([
@@ -224,7 +255,7 @@ pub fn launch(
             &(HUM_HZ * 3).to_string(),
             "2q",
         ]);
-        steps.push(("Notching hum...", hum_notch));
+        steps.push(("Notching hum...", SeqStep::Cmd(hum_notch)));
         hum_wav
     } else {
         full_wav.clone()
@@ -238,13 +269,78 @@ pub fn launch(
         .arg(&noise_prof)
         .arg(&nr_amount);
 
-    steps.push(("Sampling noise profile...", extract_sample));
-    steps.push(("Building noise profile...", noiseprof));
-    steps.push(("Reducing broadband noise...", noisered));
-    steps.push(("Normalizing...", norm));
-    steps.push(("Remuxing...", remux));
+    steps.push(("Sampling noise profile...", SeqStep::Cmd(extract_sample)));
+    steps.push(("Building noise profile...", SeqStep::Cmd(noiseprof)));
+    steps.push(("Reducing broadband noise...", SeqStep::Cmd(noisered)));
+    steps.push((
+        "Loudness normalizing...",
+        SeqStep::Fn(loudnorm_step(
+            clean_wav,
+            norm_wav,
+            params.loudnorm_target_i,
+            th,
+        )),
+    ));
+    steps.push(("Remuxing...", SeqStep::Cmd(remux)));
 
     PipelineJob::start_native_sequence(label, input, steps, Some(work_dir), &cfg.log_dir())
+}
+
+/// Build the two-pass `loudnorm` closure step: pass 1 measures `input`'s
+/// actual loudness (ffmpeg `loudnorm ... print_format=json`, parsed off
+/// stderr), pass 2 applies the correction using those measured values
+/// (`linear=true` — a single fixed gain, not per-frame dynamic processing,
+/// when the measured input is close enough to the target to normalize
+/// linearly; ffmpeg falls back to its own dynamic algorithm otherwise).
+/// Replaces the old fixed `sox norm -1`, which only looked at the single
+/// loudest peak in the whole file (see `Params::loudnorm_target_i`'s doc
+/// comment for why that under-served quiet passages).
+fn loudnorm_step(
+    input: PathBuf,
+    output: PathBuf,
+    target_i: f64,
+    threads: String,
+) -> Box<dyn FnOnce(&SeqCtx) -> bool + Send> {
+    Box::new(move |ctx: &SeqCtx| {
+        let target_i = target_i.to_string();
+
+        let mut measure = Command::new(FFMPEG);
+        measure
+            .args(["-hide_banner", "-nostdin", "-i"])
+            .arg(&input)
+            .arg("-af")
+            .arg(format!(
+                "loudnorm=I={target_i}:TP={LOUDNORM_TP}:LRA={LOUDNORM_LRA}:print_format=json"
+            ))
+            .args(["-f", "null", "-"]);
+        let (measured_ok, text) = ctx.run_captured(measure);
+        if !measured_ok || ctx.cancelled() {
+            return false;
+        }
+        let (Some(m_i), Some(m_tp), Some(m_lra), Some(m_thresh), Some(offset)) = (
+            extract_json_field(&text, "input_i"),
+            extract_json_field(&text, "input_tp"),
+            extract_json_field(&text, "input_lra"),
+            extract_json_field(&text, "input_thresh"),
+            extract_json_field(&text, "target_offset"),
+        ) else {
+            return false;
+        };
+
+        let mut apply = Command::new(FFMPEG);
+        apply
+            .args(["-hide_banner", "-nostdin", "-y", "-i"])
+            .arg(&input)
+            .arg("-af")
+            .arg(format!(
+                "loudnorm=I={target_i}:TP={LOUDNORM_TP}:LRA={LOUDNORM_LRA}:\
+                 measured_I={m_i}:measured_TP={m_tp}:measured_LRA={m_lra}:\
+                 measured_thresh={m_thresh}:offset={offset}:linear=true:print_format=summary"
+            ))
+            .args(["-ar", "48000", "-c:a", "pcm_s16le", "-threads", &threads])
+            .arg(&output);
+        ctx.run(apply)
+    })
 }
 
 #[cfg(test)]
@@ -291,14 +387,57 @@ mod tests {
 
     #[test]
     fn defaults_match_bash_script_except_gentler_nr_amount() {
-        // NORM_DB and the noise-sample window shape still match
-        // vhs_audio_cleanup.sh exactly. NR_AMOUNT is intentionally lower
-        // than the bash script's 0.25 -- see Params::default's doc comment.
-        assert_eq!(NORM_DB, "-1");
+        // The noise-sample window shape still matches vhs_audio_cleanup.sh
+        // exactly. NR_AMOUNT is intentionally lower than the bash script's
+        // 0.25 -- see Params::default's doc comment. Final normalization no
+        // longer matches the bash script at all: it uses fixed `sox norm
+        // -1` (peak-only), the GUI now uses two-pass loudnorm targeting
+        // perceived loudness (see loudnorm_step's doc comment for why).
         assert_eq!(Params::default().nr_amount, 0.15);
         assert_eq!(Params::default().noise_start_secs, 0.0);
         assert_eq!(Params::default().noise_len_secs, 1.0);
+        assert_eq!(Params::default().loudnorm_target_i, -16.0);
         assert!(Params::default().hum_enable);
+    }
+
+    #[test]
+    fn extract_json_field_parses_loudnorm_summary() {
+        let text = r#"[Parsed_loudnorm_0 @ 0x1]
+
+{
+	"input_i" : "-23.71",
+	"input_tp" : "-4.35",
+	"input_lra" : "6.00",
+	"input_thresh" : "-34.02",
+	"output_i" : "-16.01",
+	"output_tp" : "-1.50",
+	"output_lra" : "6.10",
+	"output_thresh" : "-26.34",
+	"normalization_type" : "dynamic",
+	"target_offset" : "0.01"
+}
+"#;
+        assert_eq!(
+            extract_json_field(text, "input_i").as_deref(),
+            Some("-23.71")
+        );
+        assert_eq!(
+            extract_json_field(text, "input_tp").as_deref(),
+            Some("-4.35")
+        );
+        assert_eq!(
+            extract_json_field(text, "input_lra").as_deref(),
+            Some("6.00")
+        );
+        assert_eq!(
+            extract_json_field(text, "input_thresh").as_deref(),
+            Some("-34.02")
+        );
+        assert_eq!(
+            extract_json_field(text, "target_offset").as_deref(),
+            Some("0.01")
+        );
+        assert_eq!(extract_json_field(text, "missing_key"), None);
     }
 
     #[test]
@@ -426,11 +565,11 @@ mod tests {
         assert!(output.is_file());
 
         // Measure the 60Hz-band level *relative to* the overall level,
-        // rather than an absolute dB, since sox `norm` (always applied,
-        // last stage) rescales the whole track by a single uniform gain --
-        // an absolute before/after comparison would be swamped by whatever
-        // gain norm happens to apply. The ratio cancels a uniform gain, so
-        // it isolates the notch/noisered stages' actual spectral effect.
+        // rather than an absolute dB, since the final loudnorm stage
+        // (always applied) rescales the whole track towards a target
+        // loudness -- an absolute before/after comparison would be swamped
+        // by whatever gain that applies. The ratio cancels a uniform gain,
+        // so it isolates the notch/noisered stages' actual spectral effect.
         // Verified against a hand-run copy of this exact pipeline with the
         // notch stage skipped: noisered alone moves this ratio by ~0dB on
         // a persistent tone, while the full pipeline (notch included) moves

@@ -1175,12 +1175,23 @@ impl UpscalePanel {
                             ui.label("Hum notch (60Hz)");
                             ui.checkbox(&mut params.hum_enable, "");
                             ui.end_row();
+
+                            ui.label("Loudness target (LUFS)");
+                            ui.add(
+                                egui::DragValue::new(&mut params.loudnorm_target_i)
+                                    .range(-30.0..=-6.0)
+                                    .speed(0.5)
+                                    .suffix(" LUFS"),
+                            );
+                            ui.end_row();
                         });
                     ui.label(
                         egui::RichText::new(
                             "Tip: point the sample start at an actual quiet spot on this \
                              tape -- a wrong window (e.g. dialogue starting at 0:00) makes \
-                             cleanup worse, not better.",
+                             cleanup worse, not better. Loudness target is perceived \
+                             loudness (not peak) -- -16 LUFS suits spoken word, try -20 \
+                             for wider-dynamic-range music.",
                         )
                         .small()
                         .weak(),
