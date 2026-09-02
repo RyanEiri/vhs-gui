@@ -1,4 +1,5 @@
 mod app;
+mod audio_cleanup;
 mod capture;
 mod config;
 mod fix_sync;
