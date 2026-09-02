@@ -10,8 +10,10 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::SystemTime;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Instant, SystemTime};
 
 use crate::config::Config;
 use crate::pipeline::{PipelineJob, SeqCtx, SeqStep};
@@ -348,6 +350,189 @@ fn loudnorm_step(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Quiet-spot scan — finds a genuinely silent stretch to use as the noise-
+// sample window, instead of the user (or me, by hand from the terminal)
+// scanning timestamps with ffmpeg astats. Not a PipelineJob: this doesn't
+// produce an output file, it produces a suggested value to fill into the
+// Audio Cleanup panel's fields. Same polled-background-thread idiom as
+// pipeline.rs's SeqShared/SeqCtx (Arc<Mutex<..>> state, pid tracked for
+// cancel), but self-contained here since it doesn't fit PipelineJob's shape.
+// ---------------------------------------------------------------------------
+
+const SILENCE_THRESHOLD_DB: &str = "-35dB";
+const SILENCE_MIN_DUR: &str = "2";
+
+pub struct QuietSpot {
+    pub start_secs: f64,
+    pub len_secs: f64,
+    pub rms_db: f64,
+    /// Full length of the silence gap this window was carved out of, for
+    /// the UI's confirmation label (e.g. "6.2s quiet stretch").
+    pub gap_secs: f64,
+}
+
+struct QuietSpotShared {
+    current_pid: Mutex<Option<i32>>,
+    cancel_requested: AtomicBool,
+    /// `None` while running. `Ok(Some(_))` found a spot; `Ok(None)` the scan
+    /// completed but nothing quiet enough turned up; `Err(_)` ffmpeg itself
+    /// failed to run.
+    result: Mutex<Option<Result<Option<QuietSpot>, String>>>,
+}
+
+pub struct QuietSpotScan {
+    shared: Arc<QuietSpotShared>,
+    started_at: Instant,
+}
+
+impl QuietSpotScan {
+    pub fn start(input: &Path) -> Self {
+        let shared = Arc::new(QuietSpotShared {
+            current_pid: Mutex::new(None),
+            cancel_requested: AtomicBool::new(false),
+            result: Mutex::new(None),
+        });
+        let thread_shared = Arc::clone(&shared);
+        let input = input.to_owned();
+        std::thread::spawn(move || {
+            let outcome = run_scan(&input, &thread_shared);
+            *thread_shared.result.lock().unwrap() = Some(outcome);
+        });
+        Self {
+            shared,
+            started_at: Instant::now(),
+        }
+    }
+
+    /// Non-blocking poll. Returns `Some(_)` exactly once the scan finishes;
+    /// keep calling `poll()` (it returns `None`) while it's still running.
+    pub fn poll(&self) -> Option<Result<Option<QuietSpot>, String>> {
+        self.shared.result.lock().unwrap().take()
+    }
+
+    pub fn cancel(&self) {
+        self.shared.cancel_requested.store(true, Ordering::SeqCst);
+        if let Some(pid) = *self.shared.current_pid.lock().unwrap() {
+            use nix::sys::signal::{Signal, kill};
+            use nix::unistd::Pid;
+            let _ = kill(Pid::from_raw(pid), Signal::SIGINT);
+        }
+    }
+
+    pub fn elapsed_str(&self) -> String {
+        let d = self.started_at.elapsed();
+        let m = d.as_secs() / 60;
+        let s = d.as_secs() % 60;
+        format!("{m}:{s:02}")
+    }
+}
+
+fn run_scan(input: &Path, shared: &QuietSpotShared) -> Result<Option<QuietSpot>, String> {
+    if !Path::new(FFMPEG).is_file() {
+        return Err(format!("ffmpeg not found: {FFMPEG}"));
+    }
+    if !input.is_file() {
+        return Err(format!("input not found: {}", input.display()));
+    }
+
+    let mut cmd = Command::new(FFMPEG);
+    cmd.args(["-hide_banner", "-nostdin", "-i"])
+        .arg(input)
+        .args(["-vn", "-af"])
+        .arg(format!(
+            "silencedetect=n={SILENCE_THRESHOLD_DB}:d={SILENCE_MIN_DUR}"
+        ))
+        .args(["-f", "null", "-"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        cmd.process_group(0);
+    }
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("failed to spawn ffmpeg: {e}"))?;
+    *shared.current_pid.lock().unwrap() = Some(child.id() as i32);
+    let output = child.wait_with_output();
+    *shared.current_pid.lock().unwrap() = None;
+
+    if shared.cancel_requested.load(Ordering::SeqCst) {
+        return Ok(None);
+    }
+    let output = output.map_err(|e| format!("ffmpeg failed: {e}"))?;
+    let text = String::from_utf8_lossy(&output.stderr);
+
+    let Some((gap_start, gap_end, gap_len)) = longest_silence_gap(&text) else {
+        return Ok(None);
+    };
+
+    let (start_secs, len_secs) = pick_quiet_window(gap_start, gap_end);
+    let rms_db = measure_rms(input, start_secs, len_secs).unwrap_or(f64::NAN);
+
+    Ok(Some(QuietSpot {
+        start_secs,
+        len_secs,
+        rms_db,
+        gap_secs: gap_len,
+    }))
+}
+
+/// Parse ffmpeg `silencedetect` stderr for `silence_start: X` /
+/// `silence_end: Y | silence_duration: Z` pairs and return the widest gap
+/// found, as `(start, end, duration)`. Hand-rolled line scanning, same
+/// spirit as `extract_json_field` — one fixed, well-known output shape.
+fn longest_silence_gap(text: &str) -> Option<(f64, f64, f64)> {
+    let mut best: Option<(f64, f64, f64)> = None;
+    let mut pending_start: Option<f64> = None;
+
+    for line in text.lines() {
+        if let Some(idx) = line.find("silence_start: ") {
+            let val = &line[idx + "silence_start: ".len()..];
+            pending_start = val.split_whitespace().next().and_then(|s| s.parse().ok());
+        } else if let Some(idx) = line.find("silence_end: ") {
+            let rest = &line[idx + "silence_end: ".len()..];
+            let end: Option<f64> = rest.split_whitespace().next().and_then(|s| s.parse().ok());
+            let dur = rest
+                .find("silence_duration: ")
+                .and_then(|d| rest[d + "silence_duration: ".len()..].trim().parse().ok());
+            if let (Some(start), Some(end), Some(dur)) = (pending_start.take(), end, dur)
+                && best.is_none_or(|(_, _, best_dur)| dur > best_dur)
+            {
+                best = Some((start, end, dur));
+            }
+        }
+    }
+    best
+}
+
+/// Pad 0.5s off each end of the gap (avoid a click/fade right at the
+/// silence boundary) and clamp the resulting window to 1.0..=2.0s.
+fn pick_quiet_window(gap_start: f64, gap_end: f64) -> (f64, f64) {
+    const PAD: f64 = 0.5;
+    let inner_start = gap_start + PAD;
+    let inner_len = (gap_end - gap_start - 2.0 * PAD).clamp(1.0, 2.0);
+    (inner_start, inner_len)
+}
+
+fn measure_rms(input: &Path, start_secs: f64, len_secs: f64) -> Option<f64> {
+    let out = Command::new(FFMPEG)
+        .args(["-hide_banner", "-nostdin", "-loglevel", "info"])
+        .args(["-ss", &hhmmss(start_secs), "-t", &hhmmss(len_secs), "-i"])
+        .arg(input)
+        .args(["-vn", "-af", "astats", "-f", "null", "-"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stderr);
+    text.lines()
+        .find(|l| l.contains("RMS level dB"))
+        .and_then(|l| l.rsplit(' ').next())
+        .and_then(|v| v.parse().ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,6 +636,53 @@ mod tests {
         assert_eq!(hhmmss(1.0), "00:00:01.00");
         assert_eq!(hhmmss(90.5), "00:01:30.50");
         assert_eq!(hhmmss(3661.25), "01:01:01.25");
+    }
+
+    #[test]
+    fn pick_quiet_window_pads_and_clamps() {
+        // 8s gap: 0.5s padding each end -> 7s inner, clamped down to 2.0s max.
+        assert_eq!(pick_quiet_window(296.0, 304.0), (296.5, 2.0));
+        // 3s gap: padding leaves 2s inner -> within range, used as-is.
+        assert_eq!(pick_quiet_window(100.0, 103.0), (100.5, 2.0));
+        // 1.5s gap: padding would leave 0.5s inner -> clamped up to the 1.0s floor.
+        assert_eq!(pick_quiet_window(50.0, 51.5), (50.5, 1.0));
+    }
+
+    #[test]
+    fn longest_silence_gap_picks_widest_of_several() {
+        // Real silencedetect output shape, captured from this session's
+        // manual analysis of EDIT_MASTER-MESSAGE_FROM_NAM.mkv.
+        let text = "\
+[silencedetect @ 0x1] silence_start: 125.413
+[silencedetect @ 0x1] silence_end: 127.973 | silence_duration: 2.55983
+[silencedetect @ 0x1] silence_start: 295.349
+[silencedetect @ 0x1] silence_end: 303.197 | silence_duration: 7.84769
+[silencedetect @ 0x1] silence_start: 335.639
+[silencedetect @ 0x1] silence_end: 341.351 | silence_duration: 5.71231
+";
+        let (start, end, dur) = longest_silence_gap(text).expect("a gap");
+        assert_eq!(start, 295.349);
+        assert_eq!(end, 303.197);
+        assert!((dur - 7.84769).abs() < 1e-6);
+    }
+
+    #[test]
+    fn longest_silence_gap_none_when_no_matches() {
+        assert_eq!(longest_silence_gap("nothing relevant here\n"), None);
+    }
+
+    #[test]
+    fn longest_silence_gap_ignores_unpaired_start() {
+        // A silence_start with no matching silence_end (e.g. truncated
+        // output, or silence running to EOF) must not be picked.
+        let text = "\
+[silencedetect @ 0x1] silence_start: 10.0
+[silencedetect @ 0x1] silence_end: 12.0 | silence_duration: 2.0
+[silencedetect @ 0x1] silence_start: 999.0
+";
+        let (start, end, dur) = longest_silence_gap(text).expect("a gap");
+        assert_eq!((start, end), (10.0, 12.0));
+        assert!((dur - 2.0).abs() < 1e-6);
     }
 
     /// End-to-end smoke test against a synthetic input with a delayed 60Hz
@@ -605,6 +837,49 @@ mod tests {
             after < before - 8.0,
             "60Hz hum not measurably reduced relative to overall level: before={before} after={after}"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Builds a synthetic clip with a known silent gap and confirms
+    /// `QuietSpotScan` finds it. Not run by default -- spawns real ffmpeg.
+    #[test]
+    #[ignore]
+    fn quiet_spot_scan_finds_known_gap() {
+        let dir = std::env::temp_dir().join("vhs_gui_quiet_spot_smoke");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // 2s tone, 6s silence, 2s tone -- the silent gap is unambiguous.
+        let input = dir.join("gapped.mkv");
+        let status = Command::new(FFMPEG)
+            .args(["-hide_banner", "-nostdin", "-y", "-loglevel", "error"])
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=2"])
+            .args(["-f", "lavfi", "-i", "anullsrc=duration=6"])
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=2"])
+            .args(["-filter_complex", "[0:a][1:a][2:a]concat=n=3:v=0:a=1[aout]"])
+            .args(["-map", "[aout]", "-c:a", "pcm_s16le"])
+            .arg(&input)
+            .status()
+            .expect("failed to build synthetic input");
+        assert!(status.success());
+
+        let scan = QuietSpotScan::start(&input);
+        let result = loop {
+            if let Some(r) = scan.poll() {
+                break r;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        };
+
+        let spot = result
+            .expect("scan should not error")
+            .expect("should find the gap");
+        // Gap runs 2.0..8.0 -- window should sit inside that, well clear of
+        // the tone on either side.
+        assert!(spot.start_secs >= 2.0 && spot.start_secs <= 8.0);
+        assert!(spot.start_secs + spot.len_secs <= 8.5);
+        assert!(spot.gap_secs > 5.0);
 
         let _ = fs::remove_dir_all(&dir);
     }

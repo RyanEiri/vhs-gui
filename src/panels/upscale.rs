@@ -27,6 +27,8 @@ pub struct UpscalePanel {
     rename_state: Option<(PathBuf, String)>,
     /// File the inline Audio Cleanup panel is open for, and its params.
     audio_cleanup_state: Option<(PathBuf, crate::audio_cleanup::Params)>,
+    /// File a "Find Quiet Spot" scan is running for, and the scan itself.
+    quiet_spot_scan: Option<(PathBuf, crate::audio_cleanup::QuietSpotScan)>,
     last_preview_at: Option<std::time::Instant>,
     last_preview_frames: u64,
     preview_textures: Option<UpscalePreviewTextures>,
@@ -44,6 +46,7 @@ impl UpscalePanel {
             confirm_delete: None,
             rename_state: None,
             audio_cleanup_state: None,
+            quiet_spot_scan: None,
             last_preview_at: None,
             last_preview_frames: 0,
             preview_textures: None,
@@ -1185,6 +1188,65 @@ impl UpscalePanel {
                             );
                             ui.end_row();
                         });
+
+                    // "Find Quiet Spot": scans the file with ffmpeg
+                    // silencedetect and auto-fills the two fields above,
+                    // instead of the user hand-scanning timestamps.
+                    let scan_running = self
+                        .quiet_spot_scan
+                        .as_ref()
+                        .is_some_and(|(p, _)| p == &entry.path);
+                    if scan_running {
+                        let (_, scan) = self.quiet_spot_scan.as_ref().unwrap();
+                        match scan.poll() {
+                            None => {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "🔍 Scanning... {}",
+                                            scan.elapsed_str()
+                                        ))
+                                        .small()
+                                        .weak(),
+                                    );
+                                    if ui.small_button("Cancel").clicked() {
+                                        scan.cancel();
+                                    }
+                                });
+                                ctx.request_repaint_after(std::time::Duration::from_secs(1));
+                            }
+                            Some(result) => {
+                                self.quiet_spot_scan = None;
+                                match result {
+                                    Ok(Some(spot)) => {
+                                        params.noise_start_secs = spot.start_secs;
+                                        params.noise_len_secs = spot.len_secs;
+                                        let m = (spot.start_secs / 60.0) as u64;
+                                        let s = spot.start_secs % 60.0;
+                                        *status = format!(
+                                            "Found quiet spot: {m}:{s:04.1} \
+                                             ({:.1}s stretch, {:.1}dB) -- filled in above",
+                                            spot.gap_secs, spot.rms_db
+                                        );
+                                    }
+                                    Ok(None) => {
+                                        *status = "No quiet stretch found (tried -35dB) \
+                                                    -- try a different noise start manually."
+                                            .to_string();
+                                    }
+                                    Err(e) => {
+                                        *status = format!("Quiet-spot scan failed: {e}");
+                                    }
+                                }
+                            }
+                        }
+                    } else if ui.button("🔍 Find Quiet Spot").clicked() {
+                        self.quiet_spot_scan = Some((
+                            entry.path.clone(),
+                            crate::audio_cleanup::QuietSpotScan::start(&entry.path),
+                        ));
+                    }
+
                     ui.label(
                         egui::RichText::new(
                             "Tip: point the sample start at an actual quiet spot on this \
