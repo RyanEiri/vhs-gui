@@ -48,7 +48,11 @@ DISPLAY=:0 ./target/debug/vhs-gui
   track segment-checkpoint counts off disk (`with_upscale_tracking`) for dual
   progress bars and resumability. Success/failure today is inferred by output-file
   existence (no exit-code inspection yet — an ongoing improvement, see the
-  native-port work).
+  native-port work). An upscale job outlives the GUI that started it — `on_exit`
+  doesn't cancel it, and a later vhs-gui process can find one still running via
+  `PipelineJob::check_lock`/`attach_running` (reads `vhs_upscale.sh`'s own
+  `WORK_DIR/upscale.pgid`) and reattach for progress display and Cancel, instead of
+  racing a second Real-ESRGAN process against the same checkpoint segments.
 - **`src/panels/monitor.rs`** + **`src/capture.rs`** — capture state machine (`Idle →
   Monitoring → Releasing → Capturing`), V4L2 device handoff between mpv and ffmpeg,
   PGID-file-based signal coordination (capture's flow doesn't hold a direct child
@@ -84,17 +88,32 @@ accessor once its last caller is gone.
 - **`.process_group(0)`** on every spawned job so signaling a job's process group
   never reaches the GUI process itself.
 - **No PGID files for directly-held children.** `PipelineJob` signals via the live
-  `Child`'s pid directly; PGID files (`logs/*.pgid`, written by bash scripts'
-  `trap ... EXIT`) are only needed where the GUI doesn't hold a direct handle at
-  signal time (`capture.rs`'s flow).
+  `Child`'s pid directly when it holds one; PGID files (bash scripts' `trap ...
+  EXIT`) are only *read*, never written, by Rust — needed where the GUI doesn't
+  hold a direct handle at signal time. `capture.rs`'s flow is one case; a
+  reattached upscale job (see `pipeline.rs` above) is the other — both read a
+  pgid file the bash script itself owns, rather than vhs-gui maintaining its own.
 - **`~/bin` is prepended to PATH** on every spawn so user-installed tools
   (`realesrgan-rocm`, etc.) resolve even from a desktop-launched session.
 - **Work dirs are deleted only after output-file existence is confirmed** — the
   de-facto success check throughout, in the absence of exit-code inspection.
+- **`on_exit` doesn't cancel the upscale job.** It used to, but that made the
+  GUI's own stability a single point of failure for a multi-hour GPU job —
+  `on_exit` fires on any event-loop shutdown, not just a deliberate quit, and
+  can't tell the two apart. The job is process-group-isolated and
+  checkpoint-resumable already, so leaving it running is strictly safer; Cancel
+  and Stop-after-Segment in the UI remain the explicit way to stop one.
 
 ## Versioning
 
-Tags: `v0.1.0` (single-view build), `v0.2.0` (dual-panel Monitor/Upscale rework).
+Tags: `v0.1.0` (single-view build), `v0.2.0` (dual-panel Monitor/Upscale rework),
+`v0.3.3` (upscale jobs survive/reattach across GUI restarts).
 System install target: `/usr/local/bin/vhs-gui`, launched via
 `~/.local/share/applications/vhs-gui.desktop` (`install-desktop.sh` manages both).
 Release process: `cargo build --release` → `sudo install` → bump `Cargo.toml` → tag.
+
+`[profile.release]` sets `strip = true` — the installed production binary has no
+symbols. A crash address from `dmesg`/`journalctl` won't resolve against it. To
+debug a real crash, build a temporary symbol-retaining binary (unset `strip`, or
+use the debug profile) rather than trying to resolve addresses against the stripped
+release build.

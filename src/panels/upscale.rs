@@ -25,6 +25,10 @@ pub struct UpscalePanel {
     pipeline: Option<PipelineJob>,
     confirm_delete: Option<PathBuf>,
     rename_state: Option<(PathBuf, String)>,
+    /// File the inline Audio Cleanup panel is open for, and its params.
+    audio_cleanup_state: Option<(PathBuf, crate::audio_cleanup::Params)>,
+    /// File a "Find Quiet Spot" scan is running for, and the scan itself.
+    quiet_spot_scan: Option<(PathBuf, crate::audio_cleanup::QuietSpotScan)>,
     last_preview_at: Option<std::time::Instant>,
     last_preview_frames: u64,
     preview_textures: Option<UpscalePreviewTextures>,
@@ -41,6 +45,8 @@ impl UpscalePanel {
             pipeline: None,
             confirm_delete: None,
             rename_state: None,
+            audio_cleanup_state: None,
+            quiet_spot_scan: None,
             last_preview_at: None,
             last_preview_frames: 0,
             preview_textures: None,
@@ -698,6 +704,38 @@ impl UpscalePanel {
         }
     }
 
+    /// Launch native audio cleanup (hum notch + noisered) with the given
+    /// params. Output is written beside the input, keeping `library.rs`'s VD
+    /// classification intact — see `audio_cleanup::output_path`'s doc comment.
+    fn launch_audio_cleanup(
+        &mut self,
+        input: PathBuf,
+        params: &crate::audio_cleanup::Params,
+        cfg: &Config,
+        status: &mut String,
+    ) {
+        let output = crate::audio_cleanup::output_path(&input);
+        let name = input
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("input")
+            .to_string();
+        match crate::audio_cleanup::launch(
+            &input,
+            &output,
+            cfg,
+            format!("Audio Cleanup {name}"),
+            params,
+        ) {
+            Ok(mut job) => {
+                job.output_path = Some(output);
+                *status = format!("Started: {}", job.label);
+                self.pipeline = Some(job);
+            }
+            Err(e) => *status = format!("Failed to start job: {e}"),
+        }
+    }
+
     fn upscale_output(input: &std::path::Path, cfg: &Config) -> PathBuf {
         let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("out");
         let clean = stem.strip_suffix(".viewer").unwrap_or(stem);
@@ -732,6 +770,26 @@ impl UpscalePanel {
         cfg: &Config,
         status: &mut String,
     ) {
+        let seg_dir = Self::upscale_segments_dir(&input, cfg);
+        let seg_secs = self.settings.segment_secs;
+
+        // A job from an earlier vhs-gui process (e.g. one that exited when a
+        // display-wake event disrupted the GL surface — see on_exit's doc
+        // comment) may still be running against this exact work dir. Reattach
+        // to it instead of spawning a second Real-ESRGAN process on top of the
+        // same checkpoint segments, which would corrupt them.
+        if let Some(work_dir) = seg_dir.parent()
+            && let Some(pgid) = PipelineJob::check_lock(work_dir)
+        {
+            let job = PipelineJob::attach_running(pgid, label, &input, seg_dir, output, seg_secs);
+            *status = format!("Reattached to already-running upscale (pid {pgid})");
+            self.last_preview_at = None;
+            self.last_preview_frames = 0;
+            self.preview_textures = None;
+            self.pipeline = Some(job);
+            return;
+        }
+
         // Guaranteed correct regardless of whether the settings panel was
         // open (see sync_scale_to_model's doc comment) — a stale scale here
         // would both upscale at the wrong factor and corrupt the resume
@@ -739,9 +797,6 @@ impl UpscalePanel {
         self.settings.sync_scale_to_model();
 
         Self::clear_stale_work_dir(&input, cfg, self.settings.selected_model());
-
-        let seg_dir = Self::upscale_segments_dir(&input, cfg);
-        let seg_secs = self.settings.segment_secs;
 
         let (mut owned_envs, owned_args) = self.settings.to_launch(&output);
         // WORK_ROOT must be passed explicitly: the bash script otherwise
@@ -790,8 +845,10 @@ impl UpscalePanel {
         ui.separator();
         ui.label(egui::RichText::new(&entry.name).small().weak());
 
-        let busy =
-            self.pipeline.is_some() || self.confirm_delete.is_some() || self.rename_state.is_some();
+        let busy = self.pipeline.is_some()
+            || self.confirm_delete.is_some()
+            || self.rename_state.is_some()
+            || self.audio_cleanup_state.is_some();
 
         ui.add_enabled_ui(!busy, |ui| {
             ui.horizontal_wrapped(|ui| {
@@ -883,6 +940,10 @@ impl UpscalePanel {
                         if ui.button("Fix A/V Sync").clicked() {
                             self.launch_fix_sync(entry.path.clone(), cfg, status);
                         }
+                        if ui.button("Audio Cleanup...").clicked() {
+                            self.audio_cleanup_state =
+                                Some((entry.path.clone(), crate::audio_cleanup::Params::default()));
+                        }
                     }
                     FileKind::EditMasterVD => {
                         if ui.button("Viewer Encode").clicked() {
@@ -932,6 +993,10 @@ impl UpscalePanel {
                         if ui.button("Fix A/V Sync").clicked() {
                             self.launch_fix_sync(entry.path.clone(), cfg, status);
                         }
+                        if ui.button("Audio Cleanup...").clicked() {
+                            self.audio_cleanup_state =
+                                Some((entry.path.clone(), crate::audio_cleanup::Params::default()));
+                        }
                     }
                     FileKind::Viewer => {
                         if ui.button("Upscale").clicked() {
@@ -969,6 +1034,10 @@ impl UpscalePanel {
                         }
                         if ui.button("Fix A/V Sync").clicked() {
                             self.launch_fix_sync(entry.path.clone(), cfg, status);
+                        }
+                        if ui.button("Audio Cleanup...").clicked() {
+                            self.audio_cleanup_state =
+                                Some((entry.path.clone(), crate::audio_cleanup::Params::default()));
                         }
                     }
                 }
@@ -1072,6 +1141,151 @@ impl UpscalePanel {
             None => {}
         }
 
+        // Audio Cleanup UI (two-pass borrow pattern, same shape as Rename)
+        let audio_cleanup_action: Option<Result<crate::audio_cleanup::Params, ()>> =
+            if let Some((ref orig, ref mut params)) = self.audio_cleanup_state {
+                if orig == &entry.path {
+                    ui.separator();
+                    ui.label(egui::RichText::new("Audio Cleanup").small().weak());
+                    egui::Grid::new("audio_cleanup_grid")
+                        .num_columns(2)
+                        .spacing([8.0, 4.0])
+                        .show(ui, |ui| {
+                            ui.label("Noise sample start (s)");
+                            ui.add(
+                                egui::DragValue::new(&mut params.noise_start_secs)
+                                    .range(0.0..=f64::MAX)
+                                    .speed(0.1),
+                            );
+                            ui.end_row();
+
+                            ui.label("Noise sample length (s)");
+                            ui.add(
+                                egui::DragValue::new(&mut params.noise_len_secs)
+                                    .range(0.1..=10.0)
+                                    .speed(0.1),
+                            );
+                            ui.end_row();
+
+                            ui.label("Noise reduction amount");
+                            ui.add(
+                                egui::DragValue::new(&mut params.nr_amount)
+                                    .range(0.0..=1.0)
+                                    .speed(0.01),
+                            );
+                            ui.end_row();
+
+                            ui.label("Hum notch (60Hz)");
+                            ui.checkbox(&mut params.hum_enable, "");
+                            ui.end_row();
+
+                            ui.label("Loudness target (LUFS)");
+                            ui.add(
+                                egui::DragValue::new(&mut params.loudnorm_target_i)
+                                    .range(-30.0..=-6.0)
+                                    .speed(0.5)
+                                    .suffix(" LUFS"),
+                            );
+                            ui.end_row();
+                        });
+
+                    // "Find Quiet Spot": scans the file with ffmpeg
+                    // silencedetect and auto-fills the two fields above,
+                    // instead of the user hand-scanning timestamps.
+                    let scan_running = self
+                        .quiet_spot_scan
+                        .as_ref()
+                        .is_some_and(|(p, _)| p == &entry.path);
+                    if scan_running {
+                        let (_, scan) = self.quiet_spot_scan.as_ref().unwrap();
+                        match scan.poll() {
+                            None => {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "🔍 Scanning... {}",
+                                            scan.elapsed_str()
+                                        ))
+                                        .small()
+                                        .weak(),
+                                    );
+                                    if ui.small_button("Cancel").clicked() {
+                                        scan.cancel();
+                                    }
+                                });
+                                ctx.request_repaint_after(std::time::Duration::from_secs(1));
+                            }
+                            Some(result) => {
+                                self.quiet_spot_scan = None;
+                                match result {
+                                    Ok(Some(spot)) => {
+                                        params.noise_start_secs = spot.start_secs;
+                                        params.noise_len_secs = spot.len_secs;
+                                        let m = (spot.start_secs / 60.0) as u64;
+                                        let s = spot.start_secs % 60.0;
+                                        *status = format!(
+                                            "Found quiet spot: {m}:{s:04.1} \
+                                             ({:.1}s stretch, {:.1}dB) -- filled in above",
+                                            spot.gap_secs, spot.rms_db
+                                        );
+                                    }
+                                    Ok(None) => {
+                                        *status = "No quiet stretch found (tried -35dB) \
+                                                    -- try a different noise start manually."
+                                            .to_string();
+                                    }
+                                    Err(e) => {
+                                        *status = format!("Quiet-spot scan failed: {e}");
+                                    }
+                                }
+                            }
+                        }
+                    } else if ui.button("🔍 Find Quiet Spot").clicked() {
+                        self.quiet_spot_scan = Some((
+                            entry.path.clone(),
+                            crate::audio_cleanup::QuietSpotScan::start(&entry.path),
+                        ));
+                    }
+
+                    ui.label(
+                        egui::RichText::new(
+                            "Tip: point the sample start at an actual quiet spot on this \
+                             tape -- a wrong window (e.g. dialogue starting at 0:00) makes \
+                             cleanup worse, not better. Loudness target is perceived \
+                             loudness (not peak) -- -16 LUFS suits spoken word, try -20 \
+                             for wider-dynamic-range music.",
+                        )
+                        .small()
+                        .weak(),
+                    );
+                    let mut action = None;
+                    ui.horizontal(|ui| {
+                        if ui.button("▶ Run").clicked() {
+                            action = Some(Ok(params.clone()));
+                        }
+                        if ui.button("✗ Cancel").clicked() {
+                            action = Some(Err(()));
+                        }
+                    });
+                    action
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+        match audio_cleanup_action {
+            Some(Ok(params)) => {
+                self.audio_cleanup_state = None;
+                self.launch_audio_cleanup(entry.path.clone(), &params, cfg, status);
+            }
+            Some(Err(())) => {
+                self.audio_cleanup_state = None;
+            }
+            None => {}
+        }
+
         // Running job progress
         let (do_toggle_pause, do_stop_after_seg, do_cancel) = if let Some(ref job) = self.pipeline {
             ui.separator();
@@ -1105,7 +1319,13 @@ impl UpscalePanel {
                 ui.add(egui::ProgressBar::new(fill).animate(true));
             }
 
-            let frame_txt = if job.is_upscale {
+            // A start_native_sequence job (e.g. Audio Cleanup) has no single
+            // ffmpeg progress stream — frame/time numbers below would be
+            // stale/meaningless leftovers from whichever substage happened
+            // to log last, so show its current stage label instead.
+            let frame_txt = if let Some(stage) = job.stage_text() {
+                format!("{stage}  {}", job.elapsed_str())
+            } else if job.is_upscale {
                 format!(
                     "frame {} / {}  {}",
                     job.upscaled_frames,
