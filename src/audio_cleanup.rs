@@ -51,6 +51,11 @@ pub struct Params {
     /// loudnorm instead targets consistent *perceived* loudness throughout.
     /// -16 LUFS is a standard target for spoken-word/podcast content; music
     /// or a tape with wider dynamic range may want it lower (e.g. -20).
+    /// Confirmed on a real 3-hour spoken-word capture with an unusually wide
+    /// 17.7 LU original range (`EDIT_MASTER-MESSAGE_FROM_NAM.mkv`): -16
+    /// sounded "too hot," -20 was preferred. Kept as the per-tape knob it
+    /// already was rather than becoming the new default -- this is one
+    /// data point, not a reason to assume -20 suits every tape.
     pub loudnorm_target_i: f64,
 }
 
