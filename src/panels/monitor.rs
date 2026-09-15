@@ -258,17 +258,28 @@ impl MonitorPanel {
 
     fn do_start_capture(&mut self, cfg: &Config, status: &mut String) {
         self.capture.cancel_stop_timer();
-        match self
-            .capture
-            .start(&cfg.capture_script(), &self.max_duration)
-        {
+        match self.capture.start(
+            &cfg.capture_script(),
+            crate::capture::FFMPEG_HARD_SAFETY_CAP,
+        ) {
             Ok(()) => {
                 self.state = CaptureState::Capturing;
                 self.preview_opened = false;
                 self.capture_last_reopen_at = Some(Instant::now());
-                self.capture_stop_at = None;
                 self.capture_stop_input = self.max_duration.clone();
-                *status = "Capturing…".into();
+                // The "Cap" duration is the real, user-adjustable stop target —
+                // ffmpeg itself was spawned with a fixed, much longer backstop
+                // (see FFMPEG_HARD_SAFETY_CAP), so this timer is what actually
+                // enforces it and can be freely re-armed up or down afterward
+                // via "Stop after" / Set.
+                if let Some(secs) = parse_duration_secs(&self.max_duration) {
+                    self.capture.arm_stop_timer(secs);
+                    self.capture_stop_at = Some(Instant::now() + Duration::from_secs(secs));
+                    *status = format!("Capturing… stopping in {}", fmt_secs(secs));
+                } else {
+                    self.capture_stop_at = None;
+                    *status = "Capturing…".into();
+                }
             }
             Err(e) => {
                 self.state = CaptureState::Idle;

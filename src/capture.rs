@@ -7,6 +7,13 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+/// Fixed ffmpeg `-t` backstop passed at spawn time, independent of the
+/// user-facing "Cap"/"Stop after" duration. ffmpeg's own `-t` can't be moved
+/// once the process is running, so the user-adjustable duration is enforced
+/// entirely via `arm_stop_timer`'s SIGINT instead; this only fires if the GUI
+/// itself dies mid-capture and never gets to arm or re-arm that timer.
+pub const FFMPEG_HARD_SAFETY_CAP: &str = "06:00:00";
+
 #[derive(Clone, Debug, Default)]
 pub struct CaptureStats {
     pub frame: u64,

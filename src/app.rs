@@ -97,9 +97,14 @@ impl App {
                     ui.separator();
 
                     ui.label("Cap:");
-                    ui.add(
+                    let capturing = self.monitor.state == CaptureState::Capturing;
+                    ui.add_enabled(
+                        !capturing,
                         egui::TextEdit::singleline(&mut self.monitor.max_duration)
                             .desired_width(70.0),
+                    )
+                    .on_disabled_hover_text(
+                        "Applies to the next capture only — use \"Stop after\" to change the running one",
                     );
 
                     // Compact upscale status when a job is running in the background.
