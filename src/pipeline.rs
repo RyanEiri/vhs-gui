@@ -243,6 +243,16 @@ fn parse_pgrp(stat: &str) -> Option<i32> {
     after_comm.split_whitespace().nth(2)?.parse().ok()
 }
 
+/// `SEG_SECONDS=<n>` line of a `run_config.txt`; 0 is rejected since a
+/// zero-length segment would make `total_segments` meaningless.
+fn parse_segment_secs(run_config: &str) -> Option<u32> {
+    run_config
+        .lines()
+        .find_map(|l| l.strip_prefix("SEG_SECONDS="))
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|&n| n > 0)
+}
+
 /// Shared preamble for every spawn path: probes the input, builds the log
 /// file, and computes the `~/bin`-shimmed PATH.  Returns everything each
 /// constructor needs to build its own `Command`(s) and the base `Self`.
@@ -444,6 +454,14 @@ impl PipelineJob {
             let _ = fs::remove_file(&lock);
             None
         }
+    }
+
+    /// `SEG_SECONDS` the running script was launched with, from the
+    /// `run_config.txt` it wrote into its work dir. The UI slider can have
+    /// moved since, so reattach must not trust it; `None` if the file is
+    /// missing or has no usable value.
+    pub fn running_segment_secs(work_dir: &Path) -> Option<u32> {
+        parse_segment_secs(&fs::read_to_string(work_dir.join("run_config.txt")).ok()?)
     }
 
     /// Reconstruct a `PipelineJob` for an upscale already running under `pgid`
@@ -1093,6 +1111,30 @@ mod reattach_tests {
             process_group_of(Pid::this()),
             Some(nix::unistd::getpgrp().as_raw())
         );
+    }
+
+    #[test]
+    fn parse_segment_secs_reads_value() {
+        let cfg = "SCRIPT=vhs_upscale.sh\nINPUT_BASENAME=a.mkv\nSEG_SECONDS=45\nCRF=21\n";
+        assert_eq!(parse_segment_secs(cfg), Some(45));
+    }
+
+    #[test]
+    fn parse_segment_secs_none_when_missing_or_unusable() {
+        assert_eq!(parse_segment_secs(""), None);
+        assert_eq!(parse_segment_secs("CRF=21\n"), None);
+        assert_eq!(parse_segment_secs("SEG_SECONDS=\n"), None);
+        assert_eq!(parse_segment_secs("SEG_SECONDS=abc\n"), None);
+        assert_eq!(parse_segment_secs("SEG_SECONDS=0\n"), None);
+        assert_eq!(parse_segment_secs("SEG_SECONDS=-5\n"), None);
+    }
+
+    #[test]
+    fn running_segment_secs_reads_work_dir_and_falls_back_to_none() {
+        let dir = tmp_work_dir("run-config");
+        assert_eq!(PipelineJob::running_segment_secs(&dir), None);
+        fs::write(dir.join("run_config.txt"), "SEG_SECONDS=90\n").unwrap();
+        assert_eq!(PipelineJob::running_segment_secs(&dir), Some(90));
     }
 
     #[test]
