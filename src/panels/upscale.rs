@@ -781,7 +781,9 @@ impl UpscalePanel {
         if let Some(work_dir) = seg_dir.parent()
             && let Some(pgid) = PipelineJob::check_lock(work_dir)
         {
-            let job = PipelineJob::attach_running(pgid, label, &input, seg_dir, output, seg_secs);
+            let running_secs = PipelineJob::running_segment_secs(work_dir).unwrap_or(seg_secs);
+            let job =
+                PipelineJob::attach_running(pgid, label, &input, seg_dir, output, running_secs);
             *status = format!("Reattached to already-running upscale (pid {pgid})");
             self.last_preview_at = None;
             self.last_preview_frames = 0;

@@ -1,5 +1,7 @@
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{BufRead, BufReader, Write as _};
+use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -211,6 +213,46 @@ fn pid_alive(pid: Pid) -> bool {
     kill(pid, None).is_ok()
 }
 
+/// True if `pid` is a live process-group leader running a `vhs_upscale*.sh`
+/// script. A bare `kill(pid, 0)` can't tell a still-running upscale from an
+/// unrelated process that was handed the same pid after the script died
+/// without its EXIT trap removing the lock (SIGKILL, OOM, power loss).
+fn is_upscale_group_leader(pid: Pid) -> bool {
+    let raw = pid.as_raw();
+    let Ok(cmdline) = fs::read(format!("/proc/{raw}/cmdline")) else {
+        return false;
+    };
+    let runs_upscale_script = cmdline.split(|&b| b == 0).any(|arg| {
+        Path::new(OsStr::from_bytes(arg))
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("vhs_upscale") && n.ends_with(".sh"))
+    });
+    runs_upscale_script && process_group_of(pid) == Some(raw)
+}
+
+fn process_group_of(pid: Pid) -> Option<i32> {
+    parse_pgrp(&fs::read_to_string(format!("/proc/{}/stat", pid.as_raw())).ok()?)
+}
+
+/// pgrp field of a `/proc/<pid>/stat` line. `comm` (field 2) is parenthesised
+/// and may itself contain spaces or `)`, so fields are counted from the last `)`.
+fn parse_pgrp(stat: &str) -> Option<i32> {
+    let after_comm = &stat[stat.rfind(')')? + 1..];
+    // After `)`: state, ppid, pgrp, ...
+    after_comm.split_whitespace().nth(2)?.parse().ok()
+}
+
+/// `SEG_SECONDS=<n>` line of a `run_config.txt`; 0 is rejected since a
+/// zero-length segment would make `total_segments` meaningless.
+fn parse_segment_secs(run_config: &str) -> Option<u32> {
+    run_config
+        .lines()
+        .find_map(|l| l.strip_prefix("SEG_SECONDS="))
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|&n| n > 0)
+}
+
 /// Shared preamble for every spawn path: probes the input, builds the log
 /// file, and computes the `~/bin`-shimmed PATH.  Returns everything each
 /// constructor needs to build its own `Command`(s) and the base `Self`.
@@ -397,10 +439,29 @@ impl PipelineJob {
     /// Check whether an upscale work dir has a live lock from a job we didn't
     /// spawn (started by an earlier vhs-gui process that exited without it —
     /// see `on_exit`). Returns the still-running pgid, if any.
+    ///
+    /// A lock whose pid is dead, or alive but no longer a `vhs_upscale*.sh`
+    /// group leader (the script was killed before its EXIT trap ran and the
+    /// pid was reused), is stale: it is removed so a fresh launch isn't
+    /// mistaken for a reattach, and Cancel can never signal an unrelated group.
     pub fn check_lock(work_dir: &Path) -> Option<Pid> {
-        let raw = fs::read_to_string(lock_path(work_dir)).ok()?;
+        let lock = lock_path(work_dir);
+        let raw = fs::read_to_string(&lock).ok()?;
         let pgid = Pid::from_raw(raw.trim().parse().ok()?);
-        pid_alive(pgid).then_some(pgid)
+        if is_upscale_group_leader(pgid) {
+            Some(pgid)
+        } else {
+            let _ = fs::remove_file(&lock);
+            None
+        }
+    }
+
+    /// `SEG_SECONDS` the running script was launched with, from the
+    /// `run_config.txt` it wrote into its work dir. The UI slider can have
+    /// moved since, so reattach must not trust it; `None` if the file is
+    /// missing or has no usable value.
+    pub fn running_segment_secs(work_dir: &Path) -> Option<u32> {
+        parse_segment_secs(&fs::read_to_string(work_dir.join("run_config.txt")).ok()?)
     }
 
     /// Reconstruct a `PipelineJob` for an upscale already running under `pgid`
@@ -953,22 +1014,127 @@ mod reattach_tests {
         assert!(PipelineJob::check_lock(&dir).is_none());
     }
 
+    /// Spawn `sleep` under a script named like an upscale script. With
+    /// `leader`, it gets its own process group (as the GUI launches real jobs);
+    /// without, it inherits the test runner's group. Returns once the script
+    /// is running: straight after `spawn`, `/proc/<pid>/cmdline` can still read
+    /// empty or truncated while the kernel finishes the exec.
+    fn spawn_fake_upscale(dir: &Path, leader: bool) -> Child {
+        use std::os::unix::process::CommandExt as _;
+        let script = dir.join("vhs_upscale_fake.sh");
+        let ready = dir.join("ready");
+        // The trailing `:` stops bash exec-ing `sleep` in its place, which
+        // would replace the script name in the process's cmdline.
+        fs::write(&script, "touch ready\nsleep 5\n:\n").unwrap();
+        let mut cmd = Command::new("bash");
+        cmd.arg(&script).current_dir(dir);
+        if leader {
+            cmd.process_group(0);
+        }
+        let child = cmd.spawn().unwrap();
+        for _ in 0..500 {
+            if ready.exists() {
+                return child;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        reap(child);
+        panic!("fake upscale script never signalled ready");
+    }
+
+    fn reap(mut child: Child) {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
     #[test]
-    fn check_lock_none_when_stale() {
-        let dir = tmp_work_dir("stale-lock");
-        // A pid guaranteed dead: spawn+wait, then use its former pid.
+    fn check_lock_some_when_live_upscale_leader() {
+        let dir = tmp_work_dir("live-lock");
+        let child = spawn_fake_upscale(&dir, true);
+        let pgid = Pid::from_raw(child.id() as i32);
+        fs::write(lock_path(&dir), pgid.as_raw().to_string()).unwrap();
+        assert_eq!(PipelineJob::check_lock(&dir), Some(pgid));
+        assert!(lock_path(&dir).exists());
+        reap(child);
+    }
+
+    #[test]
+    fn check_lock_clears_lock_when_pid_reused_by_unrelated_process() {
+        let dir = tmp_work_dir("reused-pid-lock");
+        // A live group leader that isn't an upscale script.
+        use std::os::unix::process::CommandExt as _;
+        let other = Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        fs::write(lock_path(&dir), other.id().to_string()).unwrap();
+        assert!(PipelineJob::check_lock(&dir).is_none());
+        assert!(!lock_path(&dir).exists(), "stale lock should be removed");
+        reap(other);
+    }
+
+    #[test]
+    fn check_lock_none_when_upscale_script_is_not_group_leader() {
+        let dir = tmp_work_dir("non-leader-lock");
+        let child = spawn_fake_upscale(&dir, false);
+        fs::write(lock_path(&dir), child.id().to_string()).unwrap();
+        assert!(PipelineJob::check_lock(&dir).is_none());
+        reap(child);
+    }
+
+    #[test]
+    fn check_lock_clears_lock_for_dead_pid() {
+        let dir = tmp_work_dir("dead-pid-lock");
         let mut child = Command::new("/bin/true").spawn().unwrap();
         let dead_pid = child.id();
         child.wait().unwrap();
         fs::write(lock_path(&dir), dead_pid.to_string()).unwrap();
         assert!(PipelineJob::check_lock(&dir).is_none());
+        assert!(!lock_path(&dir).exists());
     }
 
     #[test]
-    fn check_lock_some_when_alive() {
-        let dir = tmp_work_dir("live-lock");
-        fs::write(lock_path(&dir), Pid::this().as_raw().to_string()).unwrap();
-        assert_eq!(PipelineJob::check_lock(&dir), Some(Pid::this()));
+    fn parse_pgrp_counts_fields_from_last_paren() {
+        assert_eq!(
+            parse_pgrp("123 (bash) S 45 123 123 0 -1 4194304"),
+            Some(123)
+        );
+        assert_eq!(parse_pgrp("123 (a (b) c) S 45 99 99 0 -1"), Some(99));
+        assert_eq!(parse_pgrp("123 (x) S 45"), None);
+        assert_eq!(parse_pgrp("garbage"), None);
+    }
+
+    #[test]
+    fn process_group_of_matches_own_group() {
+        assert_eq!(
+            process_group_of(Pid::this()),
+            Some(nix::unistd::getpgrp().as_raw())
+        );
+    }
+
+    #[test]
+    fn parse_segment_secs_reads_value() {
+        let cfg = "SCRIPT=vhs_upscale.sh\nINPUT_BASENAME=a.mkv\nSEG_SECONDS=45\nCRF=21\n";
+        assert_eq!(parse_segment_secs(cfg), Some(45));
+    }
+
+    #[test]
+    fn parse_segment_secs_none_when_missing_or_unusable() {
+        assert_eq!(parse_segment_secs(""), None);
+        assert_eq!(parse_segment_secs("CRF=21\n"), None);
+        assert_eq!(parse_segment_secs("SEG_SECONDS=\n"), None);
+        assert_eq!(parse_segment_secs("SEG_SECONDS=abc\n"), None);
+        assert_eq!(parse_segment_secs("SEG_SECONDS=0\n"), None);
+        assert_eq!(parse_segment_secs("SEG_SECONDS=-5\n"), None);
+    }
+
+    #[test]
+    fn running_segment_secs_reads_work_dir_and_falls_back_to_none() {
+        let dir = tmp_work_dir("run-config");
+        assert_eq!(PipelineJob::running_segment_secs(&dir), None);
+        fs::write(dir.join("run_config.txt"), "SEG_SECONDS=90\n").unwrap();
+        assert_eq!(PipelineJob::running_segment_secs(&dir), Some(90));
     }
 
     #[test]
