@@ -225,6 +225,10 @@ impl UpscalePanel {
                             ui.selectable_value(&mut self.settings.final_scale, s, format!("{s}×"));
                         }
                     });
+                // A 1x model (or any internal scale) limits which final scales
+                // the scripts accept; correct it here so the combo shows the
+                // value that will actually be used.
+                self.settings.clamp_final_scale();
                 if self.settings.final_scale != prev_fscale {
                     changed = true;
                 }

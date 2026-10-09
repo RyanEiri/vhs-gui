@@ -263,6 +263,20 @@ impl UpscaleSettings {
         if let Some(s) = self.selected_model().and_then(infer_scale) {
             self.internal_scale = s;
         }
+        self.clamp_final_scale();
+    }
+
+    /// Keep `final_scale` something the upscale scripts accept: they downscale
+    /// from the internal scale, so the final scale can't exceed it and must
+    /// divide it evenly (otherwise they exit with "INTERNAL_SCALE must be
+    /// evenly divisible by FINAL_SCALE"). A fixed 1x model such as
+    /// VHS-Sharpen-1x therefore forces a 1x final scale. Picks the largest
+    /// valid option, so a valid choice is never lowered.
+    pub fn clamp_final_scale(&mut self) {
+        let valid = |f: u8| f <= self.internal_scale && self.internal_scale.is_multiple_of(f);
+        if !valid(self.final_scale) {
+            self.final_scale = [4u8, 2, 1].into_iter().find(|&f| valid(f)).unwrap_or(1);
+        }
     }
 
     /// Build the `(envs, positional_args)` pair for passing to `PipelineJob::start`.
@@ -339,6 +353,52 @@ mod tests {
         s.internal_scale = 4;
         s.sync_scale_to_model();
         assert_eq!(s.internal_scale, 1);
+    }
+
+    #[test]
+    fn clamp_final_scale_forces_1x_for_1x_model() {
+        let mut s = UpscaleSettings {
+            backend: Backend::Rocm,
+            final_scale: 2,
+            ..Default::default()
+        };
+        let idx = s
+            .effective_model_list()
+            .iter()
+            .position(|m| *m == "VHS-Sharpen-1x")
+            .unwrap();
+        s.model_idx = idx;
+        s.sync_scale_to_model();
+        assert_eq!((s.internal_scale, s.final_scale), (1, 1));
+    }
+
+    #[test]
+    fn clamp_final_scale_keeps_valid_choices() {
+        for (internal, final_scale) in [(4u8, 4u8), (4, 2), (4, 1), (2, 2), (2, 1), (1, 1)] {
+            let mut s = UpscaleSettings {
+                internal_scale: internal,
+                final_scale,
+                ..Default::default()
+            };
+            s.clamp_final_scale();
+            assert_eq!(s.final_scale, final_scale, "internal {internal}");
+        }
+    }
+
+    #[test]
+    fn clamp_final_scale_picks_largest_valid_option() {
+        for (internal, final_scale, want) in [(2u8, 4u8, 2u8), (3, 2, 1), (3, 4, 1), (1, 4, 1)] {
+            let mut s = UpscaleSettings {
+                internal_scale: internal,
+                final_scale,
+                ..Default::default()
+            };
+            s.clamp_final_scale();
+            assert_eq!(
+                s.final_scale, want,
+                "internal {internal} final {final_scale}"
+            );
+        }
     }
 
     #[test]
