@@ -53,10 +53,19 @@ DISPLAY=:0 ./target/debug/vhs-gui
   `PipelineJob::check_lock`/`attach_running` (reads `vhs_upscale.sh`'s own
   `WORK_DIR/upscale.pgid`) and reattach for progress display and Cancel, instead of
   racing a second Real-ESRGAN process against the same checkpoint segments.
+  `check_lock` only trusts the pid if it is a process-group leader whose
+  `/proc/<pid>/cmdline` names a `vhs_upscale*.sh` script (a SIGKILLed script leaves
+  a stale pgid file whose pid can be reused); a failing lock is deleted. Reattach
+  takes the segment length from the running job's `WORK_DIR/run_config.txt`
+  (`SEG_SECONDS`), not the UI slider.
 - **`src/panels/monitor.rs`** + **`src/capture.rs`** — capture state machine (`Idle →
   Monitoring → Releasing → Capturing`), V4L2 device handoff between mpv and ffmpeg,
   PGID-file-based signal coordination (capture's flow doesn't hold a direct child
-  handle at signal time, unlike `PipelineJob`).
+  handle at signal time, unlike `PipelineJob`). Capture length is enforced by a
+  re-armable SIGINT timer (`arm_stop_timer`): the "Cap" field arms it at capture
+  start and "Stop after"/Set re-arms it up or down at any time. ffmpeg itself is
+  spawned with a fixed 6 h `-t` backstop (`FFMPEG_HARD_SAFETY_CAP`) because its own
+  `-t` can't be changed once running; "Cap" is disabled while capturing.
 - **`src/panels/upscale.rs`** — file library, per-`FileKind` action buttons
   (`launch_pipeline`/`launch_upscale`), upscale settings panel, before/after preview.
 - **`src/library.rs`** — categorizes files into Viewer / EditMasterVD / EditMaster /
