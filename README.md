@@ -93,9 +93,10 @@ Built and run on a single Linux workstation:
   currently doesn't. Failure details and log evidence are in the
   [vhs-cli README](https://github.com/RyanEiri/vhs-cli#hardware), since
   that's the repo that owns the OBS config and logs it's diagnosed from.
-- **Upscale scratch storage:** a secondary drive mounted at
-  `/media/<user>/<external-drive>/Videos/vhs_upscale_work/` — segment
-  checkpoints for chunked/resumable upscale jobs live there by default.
+- **Scratch storage:** a secondary drive mounted at `/media/Patriot`.
+  `Videos/vhs_upscale_work/` there holds the segment checkpoints for
+  chunked/resumable upscale jobs, and `~/Videos/captures/{archival,stabilized,viewer}`
+  are symlinks into `/media/Patriot/Videos/captures/`.
 
 ## Build & Launch
 
@@ -133,16 +134,20 @@ sudo install -m 0755 target/release/vhs-gui /usr/local/bin/vhs-gui
 - **Start/Stop Capture** — spawns the capture process; the archival file opens in
   the embedded player as soon as it appears on disk, with a rolling near-live
   preview window. Ctrl+C/SIGINT during capture is a normal stop, not a failure.
+- **Capture length** — the **Cap** field arms a stop timer when a capture starts (it is disabled while capturing); **Stop after** / Set re-arms that timer up or down at any time, so a running capture can be extended as well as shortened. ffmpeg itself runs with a fixed 6 h safety cap as a backstop.
 - **Library panel** — five sections in display order: Viewer → Edit Master (VD) →
   Edit Master → Stabilized → Archival. Click any entry to open it in the player.
 - **Pipeline actions** — per-section buttons launch Denoise, QTGMC, IVTC, VDecimate,
   Viewer Encode, and all upscale variants as background jobs. Only one job runs at a
   time; buttons are disabled while busy.
+- **Audio Cleanup** — native hum notch, SoX noise reduction and two-pass loudnorm for Edit Master, Edit Master (VD) and Viewer files, plus a **Find Quiet Spot** scan to pick the noise-sample window.
 - **Upscale jobs** — dual progress bars (total segments / completed; upscaled frames
   / extracted frames for the active segment). Pause (SIGSTOP), Resume (SIGCONT),
   Stop after Segment (clean SIGINT at the next segment boundary), Cancel (immediate
   SIGINT). A side-by-side "Original vs Upscaled" preview updates every 4 seconds
-  while a job runs.
+  while a job runs. A running job outlives the GUI: a new instance reattaches to
+  it (identity-checked via the job's process-group lock) instead of starting a
+  second one.
 - **Rename** — Viewer files get a title-suggestion field pre-filled from the
   filename (strips pipeline suffixes/prefixes, title-cases with acronym
   preservation, formats with an em dash).
@@ -165,10 +170,13 @@ remaining surface area is always visible in the source.
 ## System dependency notes
 
 - Requires the `libmpv2` runtime.
-- System `ffmpeg` at `/usr/bin/ffmpeg`.
+- System `ffmpeg` 8.0.1 at `/usr/bin/ffmpeg`; SoX for the audio-cleanup chain.
 - `realesrgan-rocm` shim at `~/bin/realesrgan-rocm` for the ROCm upscale backend.
   Model weights aren't bundled with this repo — grab pre-packaged archives
   (official + community VHS-tuned, both `.pth` and ncnn formats) from
   [vhs-cli's `models-v1` release](https://github.com/RyanEiri/vhs-cli/releases/tag/models-v1).
-- VapourSynth (`vspipe`) + `PYTHONPATH` pointing at `~/.local/share/vsrepo/py` for
-  the deinterlace/telecine operations.
+- VapourSynth R55 (`/usr/bin/vspipe`, PPA build) + `PYTHONPATH` pointing at
+  `~/.local/share/vsrepo/py` for the deinterlace/telecine operations. `vspipe`
+  embeds Python 3.12 (the system Python is 3.14), so keep the `libpython3.12`
+  packages installed.
+- Built with Rust 1.98 (edition 2024) on Ubuntu 26.04.1.
