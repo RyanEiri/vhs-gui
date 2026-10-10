@@ -119,7 +119,10 @@ Tags: `v0.1.0` (single-view build), `v0.2.0` (dual-panel Monitor/Upscale rework)
 `v0.3.3` (upscale jobs survive/reattach across GUI restarts), `v0.3.4` (native
 Audio Cleanup for Edit Master/VD/Viewer -- hum notch, noisered, two-pass
 loudnorm, and a "Find Quiet Spot" noise-sample-window scan; see
-`start_native_sequence`/`SeqStep` in `pipeline.rs` for the underlying job shape).
+`start_native_sequence`/`SeqStep` in `pipeline.rs` for the underlying job shape),
+`v0.3.5` (live-extendable capture Cap timer with a 6 h ffmpeg backstop, hardened
+upscale reattach, Final Scale clamped to the model's internal scale, and a fix for
+the segfault on exit from a freed mpv update callback).
 System install target: `/usr/local/bin/vhs-gui`, launched via
 `~/.local/share/applications/vhs-gui.desktop` (`install-desktop.sh` manages both).
 Release process: `cargo build --release` → `sudo install` → bump `Cargo.toml` → tag.
