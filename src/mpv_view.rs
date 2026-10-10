@@ -561,6 +561,27 @@ void main() { f_color = texture(u_tex, v_tc); }"#;
     }
 }
 
+/// Update callback installed while an `MpvView` is dropped; does nothing.
+///
+/// It must stay zero-sized (a fn item is): `libmpv2`'s `RenderContext::drop`
+/// frees the registered callback's `Box` *before* calling
+/// `mpv_render_context_free`, and mpv can still invoke the callback from its
+/// own threads while that free is in progress. A zero-sized `Box` owns no
+/// heap memory, so a late call into it touches nothing that was freed.
+fn noop_update_callback() {}
+const _: () = assert!(std::mem::size_of_val(&noop_update_callback) == 0);
+
+impl Drop for MpvView {
+    /// Replace the repaint callback (which captures the egui `Context`) with
+    /// a no-op before `render_ctx` drops. Otherwise `RenderContext::drop` frees
+    /// the real closure and then blocks in `mpv_render_context_free` while an
+    /// mpv thread releasing a video frame still fires it — a use-after-free
+    /// that segfaulted vhs-gui on exit.
+    fn drop(&mut self) {
+        self.render_ctx.set_update_callback(noop_update_callback);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // OpenGL symbol resolver for mpv (bare fn pointer — cannot capture)
 // ---------------------------------------------------------------------------
