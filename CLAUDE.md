@@ -78,7 +78,16 @@ DISPLAY=:0 ./target/debug/vhs-gui
 - **`src/config.rs`** — all hardcoded paths (data dirs, transitional script paths,
   `upscale_work_root()` on a separate scratch drive).
 - **`src/settings.rs`** / **`src/persist.rs`** — upscale knobs (backend, model,
-  scale, CRUSH/BRIGHTNESS presets) and TOML settings persistence.
+  scale, CRUSH/BRIGHTNESS presets) and TOML settings persistence. A model with a
+  fixed native scale (e.g. `VHS-Sharpen-1x`) locks the internal scale, and
+  `clamp_final_scale` keeps Final Scale something the scripts accept (<= and a
+  divisor of the internal scale); both run at launch, not just in the panel.
+- **`src/mpv_view.rs`** — `MpvView` owns the leaked `&'static Mpv` and its
+  `RenderContext`, GL thread only. Its `Drop` replaces the repaint callback with a
+  zero-sized no-op before the context is freed: `libmpv2` frees the callback's
+  closure *before* `mpv_render_context_free`, and mpv can still fire it from a
+  decoder thread meanwhile (this segfaulted the app on exit). Keep the no-op
+  zero-sized.
 
 ## Transitional bash dependency
 
