@@ -145,7 +145,8 @@ sudo install -m 0755 target/release/vhs-gui /usr/local/bin/vhs-gui
   / extracted frames for the active segment). Pause (SIGSTOP), Resume (SIGCONT),
   Stop after Segment (clean SIGINT at the next segment boundary), Cancel (immediate
   SIGINT). A side-by-side "Original vs Upscaled" preview updates every 4 seconds
-  while a job runs. A running job outlives the GUI: a new instance reattaches to
+  while a job runs. Final Scale is kept compatible with the model's internal
+  scale (a 1x model such as VHS-Sharpen-1x forces 1x). A running job outlives the GUI: a new instance reattaches to
   it (identity-checked via the job's process-group lock) instead of starting a
   second one.
 - **Rename** — Viewer files get a title-suggestion field pre-filled from the
