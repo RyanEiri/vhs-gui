@@ -97,11 +97,6 @@ impl Config {
     pub fn capture_script(&self) -> PathBuf {
         self.scripts_dir.join("vhs_capture_ffmpeg.sh")
     }
-    /// `vhs-env/tools/` under the sibling vhs-cli repo — where the
-    /// VapourSynth `.vpy` scripts live. Used by the native `vs_ops` catalog.
-    pub fn tools_dir(&self) -> PathBuf {
-        self.scripts_dir.join("vhs-env/tools")
-    }
     // TODO(native-port): remove once Denoise is natively ported.
     pub fn denoise_script(&self) -> PathBuf {
         self.scripts_dir.join("vhs_denoise.sh")

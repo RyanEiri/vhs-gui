@@ -56,12 +56,33 @@ release, one PR takes it into `main`. Merge `main` into it when `main` moves (bu
       them comes with Phase 5.
 - [x] Fix the clippy `chunks_exact` warning at `src/main.rs:29`.
 
-## Phase 1: embed the VapourSynth assets
+## Phase 1: embed the VapourSynth scripts
 
-- [ ] Copy the five `.vpy` files and `havsfunc.py` into `assets/vs/` and `include_str!` them.
-- [ ] At job start write them to `$XDG_CACHE_HOME/vhs-gui/vs/<content-hash>/` and point vspipe and
-      `PYTHONPATH` there. Plugin load paths stay as they are.
-- [ ] Remove `Config::tools_dir`. Test: written files equal the embedded ones; the hash dir is reused.
+- [x] The five `.vpy` scripts and a small `vhs_plugins.py` loader live in `assets/vs/` and are
+      `include_str!`-ed (`src/vs_assets.rs`). At job start they are written to
+      `$XDG_CACHE_HOME/vhs-gui/vs/<content-hash>/` (rewritten only if missing or different) and that
+      directory goes first on `PYTHONPATH`.
+- [x] Plugins are found by file name in `~/.local/share/vsrepo/plugins` and the system VapourSynth
+      dirs (`VS_PLUGIN_DIRS` overrides), replacing the hardcoded `/home/ryan/...` paths. This
+      departs from the first plan, which kept absolute paths and would not have run on any other account.
+- [x] `Config::tools_dir` removed; QTGMC, IVTC, VDecimate and Field Align no longer read the vhs-cli
+      checkout. Frame hashes of the embedded scripts match vhs-cli's for QTGMC, IVTC, Field Align
+      and VDecimate on a test clip.
+- [ ] **Decision: embed the havsfunc stack?** Not done. The copy in vhs-cli is not the one that
+      runs (it calls `core.znedi3` and has a syntax error); the working one is the vsrepo copy in
+      `~/.local/share/vsrepo/py`. Upstream licences: `vsutil` MIT, `havsfunc` Unlicense,
+      `mvsfunc`, `nnedi3_resample` and `adjust` no licence detected. Embed only after the authors
+      confirm a licence; otherwise keep it external (the plugin binaries stay external either way).
+
+## Phase 1b: document and check the external tools
+
+- [ ] `docs/INSTALL.md`, linked from the README: copy-paste install steps for ffmpeg, sox, libmpv,
+      VapourSynth (name the PPA), the vsrepo plugins and Python modules, and `realesrgan-ncnn-vulkan`.
+- [ ] Put the ROCm upscaler under version control (`driver.py`, `requirements.txt`, the
+      `realesrgan-rocm` shim; neither repo has them) with venv, PyTorch ROCm wheel and
+      `HSA_OVERRIDE_GFX_VERSION=11.0.0` steps.
+- [ ] Tools window: also check the VapourSynth plugins and Python modules, so a missing `havsfunc`
+      is reported plainly instead of failing inside vspipe.
 
 ## Phase 2: Viewer Encode (smallest script)
 

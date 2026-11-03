@@ -11,6 +11,7 @@ mod pipeline;
 mod settings;
 mod tools;
 mod v4l2;
+mod vs_assets;
 mod vs_ops;
 
 /// Decode the embedded icon PNG and return `egui::IconData`.
