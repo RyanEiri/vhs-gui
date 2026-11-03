@@ -2,6 +2,7 @@ mod app;
 mod audio_cleanup;
 mod capture;
 mod config;
+mod denoise;
 mod fix_sync;
 mod library;
 mod mpv_view;
