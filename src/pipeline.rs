@@ -224,13 +224,15 @@ fn is_upscale_group_leader(pid: Pid) -> bool {
     let Ok(cmdline) = fs::read(format!("/proc/{raw}/cmdline")) else {
         return false;
     };
-    let runs_upscale_script = cmdline.split(|&b| b == 0).any(|arg| {
-        Path::new(OsStr::from_bytes(arg))
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.starts_with("vhs_upscale") && n.ends_with(".sh"))
+    // Either a `vhs_upscale*.sh` script or the native `vhs-gui upscale-worker`.
+    let runs_upscale = cmdline.split(|&b| b == 0).any(|arg| {
+        arg == crate::upscale::worker::SUBCOMMAND.as_bytes()
+            || Path::new(OsStr::from_bytes(arg))
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("vhs_upscale") && n.ends_with(".sh"))
     });
-    runs_upscale_script && process_group_of(pid) == Some(raw)
+    runs_upscale && process_group_of(pid) == Some(raw)
 }
 
 fn process_group_of(pid: Pid) -> Option<i32> {
