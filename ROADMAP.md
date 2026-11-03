@@ -203,7 +203,7 @@ In short: a detached `vhs-gui upscale-worker` process (so a job still outlives t
 port of the three scripts (they differ only in model, pre-filter, drift tolerance and a GUI-unreachable
 decomb option) with the bash scripts kept selectable until a real upscale matches.
 
-- [ ] **5a** `src/upscale/` engine core and worker for the standard variant: segment loop, frame and
+- [x] **5a** (built and tested 2026-11-03; see section 6 of the design doc) `src/upscale/` engine core and worker for the standard variant: segment loop, frame and
       segment verification, validation with one auto-repair pass, concat, audio mux, sync fix,
       `run_config.txt` byte for byte, `upscale.pgid` written by the worker, `.part` rename so a killed
       encode cannot poison a resume. Settings toggle "Upscale engine" (default: script). Golden tests
@@ -215,9 +215,10 @@ decomb option) with the bash scripts kept selectable until a real upscale matche
 - [ ] **5d** After a real upscale matches: default to the native engine; remove the three
       `upscale*_script()` accessors, `scripts_dir`, the "Scripts dir" field, `PipelineJob::start` and its
       bash call site, and the "Transitional bash dependency" section of CLAUDE.md.
-- [ ] Dead settings found while reading: drop `settings.denoise` (exports `DENOISE=1`, which no script
-      reads, and nothing in the UI sets it). `DECOMB` (anime) is unreachable from the GUI and is not
-      ported; it can return as an option later.
+- [x] Dead setting removed: `settings.denoise` and its "Denoise" checkbox in the upscale settings (it
+      exported `DENOISE=1`, which no script and not the ROCm driver reads; correction: the checkbox did
+      exist in the UI, an earlier note here said it did not). `DECOMB` (anime) is unreachable from the
+      GUI and is not ported; it can return as an option later.
 
 ## Phase 6a: two packages, Ubuntu 24.04 (R55) and 26.04 (R81)
 

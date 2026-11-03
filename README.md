@@ -140,6 +140,10 @@ sudo install -m 0755 target/release/vhs-gui /usr/local/bin/vhs-gui
 - **Capture length** — the **Cap** field arms a stop timer when a capture starts (it is disabled while capturing); **Stop after** / Set re-arms that timer up or down at any time, so a running capture can be extended as well as shortened. ffmpeg itself runs with a fixed 6 h safety cap as a backstop.
 - **Library panel** — five sections in display order: Viewer → Edit Master (VD) →
   Edit Master → Stabilized → Archival. Click any entry to open it in the player.
+- **Upscale engine** — the upscale settings have an **Engine** choice: *Script* (the original bash
+  scripts, the default) or *Native (beta)*, a built-in engine run as a detached worker so a job still
+  outlives the GUI. Native currently covers the plain Upscale buttons; Anime and B&W use the script.
+  On a test clip it produced output bit-identical to the script's.
 - **Pipeline actions** — per-section buttons launch Denoise, QTGMC, IVTC, VDecimate,
   Viewer Encode, and all upscale variants as background jobs. Only one job runs at a
   time; buttons are disabled while busy.

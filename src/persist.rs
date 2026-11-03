@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::panels::ViewMode;
 use crate::settings::{
-    Backend, BrightnessPreset, CrushPreset, UpscaleSettings, preset_models_dirs,
+    Backend, BrightnessPreset, CrushPreset, UpscaleEngine, UpscaleSettings, preset_models_dirs,
 };
 use crate::v4l2::V4l2Controls;
 
@@ -27,7 +27,8 @@ pub struct PersistedUpscaleSettings {
     pub segment_secs: u32,
     pub backend: Backend,
     pub batch_size: u32,
-    pub denoise: bool,
+    /// Added later; older settings files lack it and get the default (script).
+    pub engine: UpscaleEngine,
 }
 
 impl Default for PersistedUpscaleSettings {
@@ -47,7 +48,7 @@ impl Default for PersistedUpscaleSettings {
             segment_secs: 30,
             backend: Backend::Rocm,
             batch_size: 2,
-            denoise: false,
+            engine: UpscaleEngine::Script,
         }
     }
 }
@@ -135,7 +136,7 @@ impl AppSettings {
         upscale.segment_secs = self.upscale.segment_secs;
         upscale.backend = self.upscale.backend.clone();
         upscale.batch_size = self.upscale.batch_size;
-        upscale.denoise = self.upscale.denoise;
+        upscale.engine = self.upscale.engine;
 
         // Rescan models for the restored directory, then find the saved model by name.
         upscale.rescan();
@@ -179,7 +180,7 @@ impl AppSettings {
                 segment_secs: upscale.segment_secs,
                 backend: upscale.backend.clone(),
                 batch_size: upscale.batch_size,
-                denoise: upscale.denoise,
+                engine: upscale.engine,
             },
             paths: PersistedPaths {
                 scripts_dir: non_empty(scripts_dir_input),
@@ -192,6 +193,23 @@ impl AppSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_older_settings_file_loads_with_the_script_engine() {
+        // Saved before `engine` existed, and still carrying the removed `denoise` key.
+        let old = "[upscale]\ncrf = 19\ndenoise = true\n";
+        let settings: AppSettings = toml::from_str(old).unwrap();
+        assert_eq!(settings.upscale.crf, 19);
+        assert_eq!(settings.upscale.engine, UpscaleEngine::Script);
+        let native = "[upscale]\nengine = \"native\"\n";
+        assert_eq!(
+            toml::from_str::<AppSettings>(native)
+                .unwrap()
+                .upscale
+                .engine,
+            UpscaleEngine::Native
+        );
+    }
 
     #[test]
     fn missing_paths_table_deserializes_to_defaults() {

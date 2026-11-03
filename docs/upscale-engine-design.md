@@ -1,6 +1,6 @@
 # Native upscale engine: design (Phase 5)
 
-Status: proposal, nothing built. Written 2026-11-03 from reading `vhs_upscale.sh`,
+Status: decisions agreed (2026-11-03); sub-phase 5a built and tested (see section 6). Written from reading `vhs_upscale.sh`,
 `vhs_upscale_anime.sh`, `vhs_upscale_bw.sh` (599 + 696 + 515 lines), `src/pipeline.rs`,
 `src/settings.rs` and `src/panels/upscale.rs`.
 
@@ -45,8 +45,10 @@ The GUI passes `CRUSH`, `BRIGHTNESS`, `UPSCALE_BACKEND`, `INTERNAL_SCALE`, `FINA
 
 ### Findings that shape the port
 
-- **`DENOISE=1` is dead.** The GUI exports it when `settings.denoise` is set, but none of the three
-  scripts read it and nothing in the UI sets it. Drop it.
+- **`DENOISE=1` is dead.** The GUI exports it when `settings.denoise` is set (there is a "Denoise"
+  checkbox in the upscale settings panel), but none of the three scripts read it and neither does the
+  ROCm driver (it reads `ROCM_DTYPE`, `BATCH_SIZE` and `HIP_VISIBLE_DEVICES`). Drop it. (An earlier
+  draft of this document wrongly said nothing in the UI sets it.)
 - **`DECOMB` is unreachable from the GUI.** The anime script supports it; the GUI never passes it.
   Not ported now; it can come back as an option later (the embedded `ivtc_decombed.vpy` is there).
 - **A killed segment encode can poison a resume.** The script trusts any non-empty `seg_NNN.mp4`. If
@@ -132,3 +134,26 @@ The GUI passes `CRUSH`, `BRIGHTNESS`, `UPSCALE_BACKEND`, `INTERNAL_SCALE`, `FINA
   GPU free (no other upscale running).
 - Reattach and signal handling are subtle (a pid-reuse bug was already fixed once in `check_lock`);
   they get their own tests before the default flips.
+
+## 6. Status
+
+**5a done (2026-11-03):** `src/upscale/{plan,engine,worker}.rs`, the `upscale-worker` mode in `main`,
+the Script/Native engine setting (default Script), and native launch for the plain Upscale buttons.
+Anime and B&W are written in `plan.rs` but not yet wired or tested against their scripts (5b).
+
+Evidence:
+- 38 unit tests on the pure planning code and the engine against stub tools (full run, resume, the
+  fingerprint guard, both frame-count checks, cancel mid-segment, auto-repair and its failure path,
+  no audio, preflight errors, ROCm batch size).
+- Golden test (`cargo test -- --ignored`): the real `vhs_upscale.sh`, run with stubs, and the engine
+  make the same ffprobe, ffmpeg and upscaler calls and write the same `run_config.txt` for six
+  configurations (three segments, one segment, no audio, ROCm with a community model, heavy crush with
+  brightness, PAL). Breaking one flag on purpose made it fail.
+- Worker integration tests with the real binary: lock file and process group, pause and resume with
+  SIGSTOP/SIGCONT, SIGINT cancel (exit 130, no checkpoint), a second worker refused, recovery after
+  SIGKILL, usage errors.
+- GPU equivalence test (`cargo test --test upscale_equivalence -- --ignored`): the script and the
+  worker on an 8 s clip with the ROCm backend and the real tools produced the same streams, 239
+  frames, 8.008 s, and **bit-identical video frames and audio**.
+
+Not yet verified: a real tape-length upscale (gates the default flip, 5d); the GUI toggle by hand.
