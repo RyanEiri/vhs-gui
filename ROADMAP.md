@@ -22,6 +22,13 @@ Denoise+QTGMC (`vhs_process.sh`), Viewer Encode (`vhs_viewer_encode.sh`), and th
 checkout. Tool paths are hardcoded (`/usr/bin/ffmpeg`, `/usr/bin/ffprobe`, `/usr/bin/sox`,
 `~/bin/realesrgan-rocm`, `~/.local/share/vsrepo/py`).
 
+## Branching
+
+All work for this project lands on the long-lived branch `feat/self-contained`, cut from `main`.
+Each phase is a short branch named `feat/self-contained-<phase>` (for example
+`feat/self-contained-tools`) with a PR into `feat/self-contained`. When the branch is ready for a
+release, one PR takes it into `main`. Merge `main` into it when `main` moves (bug fixes, releases).
+
 ## Rules for every phase
 
 - Extend `PipelineJob` (`start_native_single`, `start_native_pipe`, `start_native_sequence`); no
