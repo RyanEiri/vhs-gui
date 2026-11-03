@@ -6,6 +6,7 @@ mod config;
 mod denoise;
 mod fix_sync;
 mod library;
+mod monitor_feed;
 mod mpv_view;
 mod panels;
 mod persist;

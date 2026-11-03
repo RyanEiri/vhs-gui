@@ -172,7 +172,8 @@ release, one PR takes it into `main`. Merge `main` into it when `main` moves (bu
       `find_orphans` scans `/proc`; the monitor panel shows "A capture is already running" with
       Reattach and Stop it; `logs/capture.pgid` is written again so a capture can be stopped by hand.
       Tested with a real stand-in process (found, adopted, stopped).
-- [ ] **GUI crash when the live V4L2 monitor is closed (pre-existing, not from this port).**
+- [x] **GUI crash when the live V4L2 monitor is closed: fixed by not letting mpv open the device
+      (2026-11-03).** Original finding (pre-existing, not from this port):
       Core dumps: the installed v0.3.5 on 10-30 and 11-02, and the debug build on 11-03 (twice, at
       capture start). Same stack every time on mpv's demuxer thread: `av_packet_unref` ->
       `av_buffer_unref` -> a libavdevice free callback -> jump to a bad address; no vhs-gui frames.
@@ -181,9 +182,14 @@ release, one PR takes it into `main`. Merge `main` into it when `main` moves (bu
       (`ioctl(VIDIOC_QBUF)` errors, 2 per run, 90 of 90 runs) but not crashing without the GUI's
       memory activity, and that mpv's `idle` is true immediately after `stop` while the grabber is
       still held (ffmpeg started right after idle got "Device or resource busy" 15 of 15 times; 1 s
-      later 0 of 15). So a delay before starting ffmpeg does not remove the bug. Proposed fix: stop
-      mpv opening `/dev/video` at all and monitor through a small ffmpeg process sending the same UDP
-      preview mpv already plays during a capture.
+      later 0 of 15). So a delay before starting ffmpeg does not remove the bug.
+      Fix: `src/monitor_feed.rs`. The monitor is a small ffmpeg process sending the capture's UDP
+      preview; mpv only plays UDP, so no V4L2 packet ever reaches it. Start Capture stops the feed
+      and waits until it has exited before starting the capture; a timed stop resumes the monitor
+      only after the capture has exited; the feed dies with the GUI (`PR_SET_PDEATHSIG`). Tests
+      with the real grabber, GUI closed: the feed streams valid MPEG-TS to the preview port and
+      releases the device, and monitor, then a 3 s capture, then monitor again works. The mpv and
+      egui side (picture quality, latency, the buttons) is verified in the GUI by hand.
 - [ ] Run a real capture in the GUI with the USB grabber and a tape or live signal: start, preview in
       the monitor panel, Stop after, natural end at the cap, and a Cancel. Blocked by the crash
       above when the monitor was open first; start from Idle (no Monitor) to test the capture itself.

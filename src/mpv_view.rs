@@ -15,7 +15,6 @@ pub enum Source {
     /// A file that is actively being written (e.g. a live capture).
     /// Like File but with cache-pause=false so mpv goes idle (not paused)
     /// when it reaches the current write position, allowing EOF recovery.
-    V4l2(String),
     Udp(String),
 }
 
@@ -23,12 +22,11 @@ impl Source {
     pub fn to_mpv_url(&self) -> String {
         match self {
             Source::File(p) => p.to_string_lossy().into_owned(),
-            Source::V4l2(dev) => format!("av://v4l2:{dev}"),
             Source::Udp(url) => url.clone(),
         }
     }
     pub fn is_live(&self) -> bool {
-        matches!(self, Source::V4l2(_) | Source::Udp(_))
+        matches!(self, Source::Udp(_))
     }
 }
 
@@ -199,17 +197,7 @@ impl MpvView {
 
     pub fn open(&mut self, src: &Source) {
         let url = src.to_mpv_url();
-        if matches!(src, Source::V4l2(_)) {
-            // Raw V4L2: untimed mode prevents burst-then-stall stutter from
-            // the unclocked raw input; cap demuxer read-ahead accordingly.
-            let _ = self.mpv.set_property("untimed", true);
-            let _ = self.mpv.set_property("vd-lavc-threads", 1i64);
-            let _ = self.mpv.set_property("demuxer-max-bytes", "200KiB");
-            let _ = self.mpv.set_property("demuxer-max-back-bytes", "0");
-            let _ = self.mpv.set_property("cache-pause", false);
-            let _ = self.mpv.set_property("framedrop", "vo");
-            let _ = self.mpv.set_property("demuxer-lavf-o", "fflags=nobuffer");
-        } else if matches!(src, Source::Udp(_)) {
+        if matches!(src, Source::Udp(_)) {
             // MPEG-TS UDP preview: encoded with proper PTS so use timed playback.
             // (mpv's native OSD doesn't composite through the custom FBO blit —
             // the capture timer is drawn as an egui overlay instead.)
