@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+VENV="$HOME/opt/realesrgan-rocm/venv"
+DRIVER="$HOME/opt/realesrgan-rocm/driver.py"
+# gfx1101 (RX 7800 XT) isn't in the prebuilt wheel's target list; override to gfx1100
+export HSA_OVERRIDE_GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION:-11.0.0}"
+exec "$VENV/bin/python" "$DRIVER" "$@"
