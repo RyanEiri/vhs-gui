@@ -108,6 +108,18 @@ DISPLAY=:0 ./target/debug/vhs-gui
   `extract_full_args`/`remux_args` with `audio_cleanup.rs`. Denoise+QTGMC is this job with QTGMC chained
   after it by `UpscalePanel::chain_after` (see `chained_next`). The ignored `matches_the_bash_script`
   test compares against the real script with stub tools; rerun it after changes.
+- **`src/upscale/`** — the native upscale engine (Script/Native setting, default Script; native only for
+  the plain Upscale buttons so far). `plan.rs` is pure: segment math, output size, filter chains, the
+  `run_config.txt` fingerprint (byte for byte as the scripts write it) and every command's arguments.
+  `engine.rs` runs them (`Binaries` are injected so tests use stubs); a segment is encoded into
+  `seg_part/` and renamed into `segments/` only after its frame count checks out. `worker.rs` is
+  `vhs-gui upscale-worker JOB.toml`, decided in `main()` before any GUI setup: it runs detached in its
+  own process group (`upscale::start_worker`, via `/proc/self/exe`), writes `upscale.pgid`, refuses a
+  second worker on the same work dir, and treats SIGINT/SIGTERM as cancel (exit 130). Pause/resume are
+  SIGSTOP/SIGCONT to the group. `testkit.rs` + `tests/support/stub.py` are stub ffmpeg/ffprobe/upscaler
+  programs; the ignored golden test compares the engine with the real script, and
+  `tests/upscale_equivalence.rs` (ignored, needs the GPU) compares real outputs. Read
+  `docs/upscale-engine-design.md` before changing any of it.
 - **`src/viewer_encode.rs`** — native port of `vhs_viewer_encode.sh` (Viewer Encode button). `plan` picks
   the SD/VHS or HD preset from the source height, `ffmpeg_args` builds the argument list as a pure
   function, `launch` returns `Started(job, output)` or `Exists(path)` (an existing viewer copy is never
@@ -155,8 +167,9 @@ accessor once its last caller is gone.
   never reaches the GUI process itself.
 - **No PGID files for directly-held children.** `PipelineJob` and `CaptureController` signal
   via the live `Child`'s pid directly. A PGID file (a bash script's `trap ... EXIT`) is only
-  *read*, never written, by Rust, and only for a reattached upscale job (see `pipeline.rs`
-  above), where the GUI holds no handle because the script outlived the process that started it.
+  *read* by the GUI, and only for a reattached upscale job (see `pipeline.rs` above), where the GUI
+  holds no handle because the job outlived the process that started it. The native upscale worker
+  writes its own `upscale.pgid` (it is the job, not the GUI) and `check_lock` accepts either kind.
 - **`~/bin` is prepended to PATH** on every spawn so user-installed tools
   (`realesrgan-rocm`, etc.) resolve even from a desktop-launched session.
 - **Work dirs are deleted only after output-file existence is confirmed** — the
