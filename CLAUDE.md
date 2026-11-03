@@ -59,13 +59,19 @@ DISPLAY=:0 ./target/debug/vhs-gui
   takes the segment length from the running job's `WORK_DIR/run_config.txt`
   (`SEG_SECONDS`), not the UI slider.
 - **`src/panels/monitor.rs`** + **`src/capture.rs`** — capture state machine (`Idle →
-  Monitoring → Releasing → Capturing`), V4L2 device handoff between mpv and ffmpeg,
-  PGID-file-based signal coordination (capture's flow doesn't hold a direct child
-  handle at signal time, unlike `PipelineJob`). Capture length is enforced by a
-  re-armable SIGINT timer (`arm_stop_timer`): the "Cap" field arms it at capture
-  start and "Stop after"/Set re-arms it up or down at any time. ffmpeg itself is
-  spawned with a fixed 6 h `-t` backstop (`FFMPEG_HARD_SAFETY_CAP`) because its own
-  `-t` can't be changed once running; "Cap" is disabled while capturing.
+  Monitoring → Releasing → Capturing`), V4L2 device handoff between mpv and ffmpeg.
+  `CaptureController` spawns ffmpeg directly (formerly `vhs_capture_ffmpeg.sh`) in its own
+  process group, with stderr going straight to `logs/<prefix>_<ts>.ffmpeg.log` so a capture and
+  its log survive the GUI dying. `CaptureSettings` holds the hardware/codec settings: compiled-in
+  defaults equal to the shipped archival `capture.env`, with the active slot's
+  `~/Videos/ffmpeg-current/capture.env` applied over them. `ffmpeg_args` is pure and compared with
+  the real script by the ignored `matches_the_bash_script` test (read its safety notes before
+  changing it: it once started a real capture). Capture length is enforced by a re-armable SIGINT
+  timer (`arm_stop_timer`) that only signals the live process group (`signal_if_live`): the "Cap"
+  field arms it at capture start and "Stop after"/Set re-arms it up or down at any time. ffmpeg
+  itself runs with a fixed 6 h `-t` backstop (`FFMPEG_HARD_SAFETY_CAP`) because its own `-t` can't
+  be changed once running; "Cap" is disabled while capturing. Progress is read from the last 8 KiB
+  of the log, split on `\r` as well as `\n`.
 - **`src/panels/upscale.rs`** — file library, per-`FileKind` action buttons
   (`launch_pipeline`/`launch_upscale`), upscale settings panel, before/after preview.
 - **`src/library.rs`** — categorizes files into Viewer / EditMasterVD / EditMaster /
@@ -133,12 +139,10 @@ accessor once its last caller is gone.
 - **Time-based progress**, not frame-based (see `pipeline.rs`).
 - **`.process_group(0)`** on every spawned job so signaling a job's process group
   never reaches the GUI process itself.
-- **No PGID files for directly-held children.** `PipelineJob` signals via the live
-  `Child`'s pid directly when it holds one; PGID files (bash scripts' `trap ...
-  EXIT`) are only *read*, never written, by Rust — needed where the GUI doesn't
-  hold a direct handle at signal time. `capture.rs`'s flow is one case; a
-  reattached upscale job (see `pipeline.rs` above) is the other — both read a
-  pgid file the bash script itself owns, rather than vhs-gui maintaining its own.
+- **No PGID files for directly-held children.** `PipelineJob` and `CaptureController` signal
+  via the live `Child`'s pid directly. A PGID file (a bash script's `trap ... EXIT`) is only
+  *read*, never written, by Rust, and only for a reattached upscale job (see `pipeline.rs`
+  above), where the GUI holds no handle because the script outlived the process that started it.
 - **`~/bin` is prepended to PATH** on every spawn so user-installed tools
   (`realesrgan-rocm`, etc.) resolve even from a desktop-launched session.
 - **Work dirs are deleted only after output-file existence is confirmed** — the
