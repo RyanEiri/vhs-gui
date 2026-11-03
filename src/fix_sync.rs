@@ -122,22 +122,48 @@ pub fn launch(
     cfg: &Config,
     label: String,
 ) -> anyhow::Result<Option<PipelineJob>> {
+    let Some(tempo) = correction_needed(input)? else {
+        return Ok(None);
+    };
+    let job = PipelineJob::start_native_single(
+        label,
+        input,
+        correction_command(input, output, tempo),
+        &cfg.log_dir(),
+    )?;
+    Ok(Some(job))
+}
+
+/// Synchronous form for the upscale engine: write a drift-corrected copy of `input` to `output`
+/// and return `true`, or return `false` (writing nothing) when the drift is below the threshold.
+pub fn correct(input: &Path, output: &Path) -> anyhow::Result<bool> {
+    let Some(tempo) = correction_needed(input)? else {
+        return Ok(false);
+    };
+    let status = correction_command(input, output, tempo).status()?;
+    if !status.success() {
+        anyhow::bail!("the sync correction failed ({status})");
+    }
+    Ok(true)
+}
+
+/// The tempo to apply, or `None` when no correction is worth making.
+fn correction_needed(input: &Path) -> anyhow::Result<Option<f64>> {
     tools::require(Tool::Ffprobe)?;
     tools::require(Tool::Ffmpeg)?;
     if !input.is_file() {
         anyhow::bail!("input not found: {}", input.display());
     }
-
     let v_dur = stream_duration_secs(input, "v:0")
         .ok_or_else(|| anyhow::anyhow!("could not determine video duration"))?;
     let a_dur = stream_duration_secs(input, "a:0")
         .ok_or_else(|| anyhow::anyhow!("could not determine audio duration"))?;
-
     let tempo = compute_tempo(v_dur, a_dur);
-    if drift_pct(tempo) < DRIFT_THRESHOLD_PCT {
-        return Ok(None);
-    }
+    Ok((drift_pct(tempo) >= DRIFT_THRESHOLD_PCT).then_some(tempo))
+}
 
+/// ffmpeg copies the video and re-encodes only the audio, stretched by `tempo`.
+fn correction_command(input: &Path, output: &Path, tempo: f64) -> std::process::Command {
     let chain = build_atempo_chain(tempo);
     let mut cmd = tools::command(Tool::Ffmpeg);
     cmd.args(["-y", "-i"])
@@ -146,9 +172,7 @@ pub fn launch(
         .arg(format!("{chain},aresample=async=1:first_pts=0"))
         .args(["-c:a", "aac", "-b:a", "192k"])
         .arg(output);
-
-    let job = PipelineJob::start_native_single(label, input, cmd, &cfg.log_dir())?;
-    Ok(Some(job))
+    cmd
 }
 
 #[cfg(test)]
