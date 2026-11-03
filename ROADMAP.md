@@ -190,9 +190,11 @@ release, one PR takes it into `main`. Merge `main` into it when `main` moves (bu
       with the real grabber, GUI closed: the feed streams valid MPEG-TS to the preview port and
       releases the device, and monitor, then a 3 s capture, then monitor again works. The mpv and
       egui side (picture quality, latency, the buttons) is verified in the GUI by hand.
-- [ ] Run a real capture in the GUI with the USB grabber and a tape or live signal: start, preview in
-      the monitor panel, Stop after, natural end at the cap, and a Cancel. Blocked by the crash
-      above when the monitor was open first; start from Idle (no Monitor) to test the capture itself.
+- [x] Monitor and capture tried in the GUI by Ryan (2026-11-03, debug build of 15:01, after the monitor
+      fix): reported working ("tests look good"). Which cases were run is not recorded here; the
+      cases to cover are Monitor then Start Capture then Stop, a timed stop that resumes the monitor,
+      and a cancel. The monitor picture is now the scaled 480x360 preview with a little more delay
+      than mpv's direct view, which could be revisited (`preview_scale` in `CaptureSettings`).
 
 ## Phase 5: upscale (largest, riskiest)
 
