@@ -291,8 +291,138 @@ fn sigint_group(pgid: i32) {
     let _ = killpg(Pid::from_raw(pgid), Signal::SIGINT);
 }
 
+/// A capture ffmpeg that is already running and was not started by this process: for example
+/// one that outlived a GUI crash. It keeps recording (to the `-t` backstop) and keeps the grabber
+/// open, so the monitor cannot start until it is stopped or re-attached.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OrphanCapture {
+    pub pid: i32,
+    pub pgid: i32,
+    pub output: PathBuf,
+    pub age_secs: u64,
+}
+
+impl OrphanCapture {
+    /// Only a process-group leader can be adopted: its group is ours to signal. A capture ffmpeg
+    /// from the old bash script shares a group with `bash` and `tee`, which must not be signalled
+    /// as a group.
+    pub fn is_group_leader(&self) -> bool {
+        self.pid == self.pgid
+    }
+
+    /// SIGINT, which makes ffmpeg finalize the file: to the whole group for a leader, else to the
+    /// process alone.
+    pub fn stop(&self) {
+        use nix::sys::signal::{Signal, kill, killpg};
+        use nix::unistd::Pid;
+        if self.is_group_leader() {
+            let _ = killpg(Pid::from_raw(self.pgid), Signal::SIGINT);
+        } else {
+            let _ = kill(Pid::from_raw(self.pid), Signal::SIGINT);
+        }
+    }
+
+    pub fn name(&self) -> String {
+        self.output
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+}
+
+/// `/proc/<pid>/cmdline` as arguments.
+fn split_cmdline(raw: &[u8]) -> Vec<String> {
+    raw.split(|&b| b == 0)
+        .filter(|a| !a.is_empty())
+        .map(|a| String::from_utf8_lossy(a).into_owned())
+        .collect()
+}
+
+/// If `args` is a capture ffmpeg (program named `ffmpeg`, a `-f v4l2` input, and a `.mkv` output
+/// that is not an input), return that output file.
+pub fn capture_output_of(args: &[String]) -> Option<PathBuf> {
+    let prog = Path::new(args.first()?).file_name()?.to_str()?;
+    if prog != "ffmpeg" || !args.windows(2).any(|w| w[0] == "-f" && w[1] == "v4l2") {
+        return None;
+    }
+    args.iter()
+        .enumerate()
+        .skip(1)
+        .find(|(i, a)| a.ends_with(".mkv") && args[i - 1] != "-i")
+        .map(|(_, a)| PathBuf::from(a))
+}
+
+/// Seconds since a process started, from its `/proc/<pid>/stat`, the system uptime and the clock
+/// tick rate. Field 22 (`starttime`, in ticks since boot) is index 19 after the `)` that ends
+/// the command name, which may itself contain spaces.
+fn age_from_stat(stat: &str, uptime_secs: f64, ticks_per_sec: f64) -> Option<u64> {
+    let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
+    let start_ticks: f64 = fields.get(19)?.parse().ok()?;
+    Some((uptime_secs - start_ticks / ticks_per_sec).max(0.0) as u64)
+}
+
+fn process_age_secs(pid: i32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let uptime: f64 = fs::read_to_string("/proc/uptime")
+        .ok()?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    // SAFETY: sysconf only reads a system constant.
+    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
+    age_from_stat(&stat, uptime, hz)
+}
+
+/// Capture ffmpegs among `procs` (`(pid, raw cmdline, pgid)`). Pure so it can be tested.
+fn orphans_among(procs: impl Iterator<Item = (i32, Vec<u8>, i32)>) -> Vec<OrphanCapture> {
+    procs
+        .filter_map(|(pid, raw, pgid)| {
+            let output = capture_output_of(&split_cmdline(&raw))?;
+            Some(OrphanCapture {
+                pid,
+                pgid,
+                output,
+                age_secs: process_age_secs(pid).unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
+/// Every capture ffmpeg of this user currently running, found by scanning `/proc`. Used at
+/// startup and while idle to notice a capture that outlived its GUI.
+pub fn find_orphans() -> Vec<OrphanCapture> {
+    use std::os::unix::fs::MetadataExt as _;
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let me = unsafe { libc::getuid() };
+    let Ok(dir) = fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let procs = dir.filter_map(Result::ok).filter_map(|e| {
+        let pid: i32 = e.file_name().to_str()?.parse().ok()?;
+        if e.metadata().ok()?.uid() != me {
+            return None;
+        }
+        let raw = fs::read(e.path().join("cmdline")).ok()?;
+        let pgid = nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(pid)))
+            .ok()?
+            .as_raw();
+        Some((pid, raw, pgid))
+    });
+    orphans_among(procs)
+}
+
+/// `logs/capture.pgid`: the running capture's process group, so it can also be stopped by hand
+/// with `kill -INT -$(cat ~/Videos/logs/capture.pgid)`, as with the old script.
+fn pgid_file(log_dir: &Path) -> PathBuf {
+    log_dir.join("capture.pgid")
+}
+
 pub struct CaptureController {
     child: Option<Child>,
+    /// A capture adopted with [`CaptureController::adopt`]: no `Child` handle, only its pid.
+    attached_pid: Option<i32>,
+    pgid_file: Option<PathBuf>,
     /// Process group of the running capture, `None` when idle. Shared with the stop timer.
     live_pgid: Arc<Mutex<Option<i32>>>,
     log_path: Option<PathBuf>,
@@ -309,6 +439,8 @@ impl CaptureController {
     pub fn new() -> Self {
         Self {
             child: None,
+            attached_pid: None,
+            pgid_file: None,
             live_pgid: Arc::new(Mutex::new(None)),
             log_path: None,
             started_at: None,
@@ -320,7 +452,7 @@ impl CaptureController {
     }
 
     pub fn is_running(&self) -> bool {
-        self.child.is_some()
+        self.child.is_some() || self.attached_pid.is_some()
     }
 
     pub fn start(&mut self, cfg: &Config, max_duration: &str) -> anyhow::Result<()> {
@@ -337,7 +469,7 @@ impl CaptureController {
         log_dir: &Path,
         max_duration: &str,
     ) -> anyhow::Result<()> {
-        if self.child.is_some() {
+        if self.is_running() {
             anyhow::bail!("capture already running");
         }
         let ts = clock::stamp();
@@ -362,6 +494,9 @@ impl CaptureController {
             .spawn()?;
 
         *self.live_pgid.lock().unwrap() = Some(child.id() as i32);
+        let pgid_file = pgid_file(log_dir);
+        let _ = fs::write(&pgid_file, format!("{}\n", child.id()));
+        self.pgid_file = Some(pgid_file);
         self.started_at = Some(Instant::now());
         self.expected_output = Some(out);
         self.output_path = None;
@@ -389,6 +524,24 @@ impl CaptureController {
                     }
                 }
             }
+            // An adopted capture has no handle: it is alive while its pid still runs a capture
+            // ffmpeg for the same output (a recycled pid, or a zombie with an empty command line,
+            // does not match).
+            if let (Some(pid), Some(want)) = (self.attached_pid, &self.expected_output) {
+                let alive = fs::read(format!("/proc/{pid}/cmdline"))
+                    .ok()
+                    .and_then(|raw| capture_output_of(&split_cmdline(&raw)))
+                    .is_some_and(|out| &out == want);
+                if !alive {
+                    self.attached_pid = None;
+                    self.started_at = None;
+                    *live = None;
+                    exited = true;
+                }
+            }
+        }
+        if exited && let Some(f) = self.pgid_file.take() {
+            let _ = fs::remove_file(f);
         }
         if let Some(started) = self.started_at
             && let Ok(mut s) = self.stats.lock()
@@ -411,6 +564,39 @@ impl CaptureController {
             s.time = time;
             s.bitrate = bitrate;
         }
+    }
+
+    /// Take over a capture that is already running (see [`find_orphans`]): the controller then
+    /// shows its progress, can stop it and can arm the stop timer for it, as for a capture it
+    /// started itself. Only a process-group leader can be adopted.
+    pub fn adopt(&mut self, orphan: &OrphanCapture, log_dir: &Path) -> anyhow::Result<()> {
+        if self.is_running() {
+            anyhow::bail!("capture already running");
+        }
+        if !orphan.is_group_leader() {
+            anyhow::bail!(
+                "that capture shares its process group with other processes; stop it instead"
+            );
+        }
+        let stem = orphan
+            .output
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let log = log_dir.join(format!("{stem}.ffmpeg.log"));
+        *self.live_pgid.lock().unwrap() = Some(orphan.pgid);
+        self.attached_pid = Some(orphan.pid);
+        self.pgid_file = Some(pgid_file(log_dir));
+        self.started_at = Some(
+            Instant::now()
+                .checked_sub(Duration::from_secs(orphan.age_secs))
+                .unwrap_or_else(Instant::now),
+        );
+        self.expected_output = Some(orphan.output.clone());
+        self.output_path = None;
+        self.log_path = log.is_file().then_some(log);
+        *self.stats.lock().unwrap() = CaptureStats::default();
+        Ok(())
     }
 
     pub fn stop(&mut self) {
@@ -784,6 +970,192 @@ mod tests {
         assert_eq!(c.elapsed_str(), "--:--:--");
         // Idle again: a new capture can start.
         start_stub(&mut c, &p, &dir.0);
+    }
+
+    // ---- orphans: a capture ffmpeg that outlived its GUI ----
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn cmdline(parts: &[&str]) -> Vec<u8> {
+        let mut raw = Vec::new();
+        for p in parts {
+            raw.extend(p.as_bytes());
+            raw.push(0);
+        }
+        raw
+    }
+
+    #[test]
+    fn capture_command_lines_are_recognized() {
+        let s = CaptureSettings::defaults(&cfg());
+        let mut a = vec!["/usr/bin/ffmpeg".to_string()];
+        a.extend(strings(
+            &ffmpeg_args(&s, "06:00:00", Path::new("/o/a.mkv"), true).unwrap(),
+        ));
+        assert_eq!(capture_output_of(&a), Some(PathBuf::from("/o/a.mkv")));
+
+        // Things that are not a capture ffmpeg.
+        let not = |v: &[&str]| assert_eq!(capture_output_of(&args(v)), None, "{v:?}");
+        not(&["/usr/bin/ffmpeg", "-i", "in.mkv", "-c", "copy", "out.mkv"]); // no v4l2 input
+        not(&["/usr/bin/vlc", "-f", "v4l2", "x.mkv"]); // another program
+        not(&[
+            "/usr/bin/ffmpeg",
+            "-f",
+            "v4l2",
+            "-i",
+            "/dev/video0",
+            "-f",
+            "null",
+            "-",
+        ]); // no .mkv
+        not(&[
+            "/usr/bin/ffmpeg",
+            "-f",
+            "v4l2",
+            "-i",
+            "in.mkv",
+            "-f",
+            "null",
+            "-",
+        ]); // .mkv is an input
+        not(&[]);
+    }
+
+    #[test]
+    fn command_lines_split_on_nul() {
+        assert_eq!(split_cmdline(b"a\0-f\0v4l2\0"), args(&["a", "-f", "v4l2"]));
+        assert!(split_cmdline(b"").is_empty());
+    }
+
+    #[test]
+    fn only_capture_processes_are_picked_from_a_process_list() {
+        let cap = |out: &str| cmdline(&["/usr/bin/ffmpeg", "-f", "v4l2", "-i", "/dev/video2", out]);
+        let procs = vec![
+            (10, cap("/o/a.mkv"), 10), // group leader: ours to adopt
+            (11, cmdline(&["/usr/bin/zsh"]), 11),
+            (12, cap("/o/b.mkv"), 9), // shares a group (the old script's ffmpeg)
+        ];
+        let found = orphans_among(procs.into_iter());
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].name(), "a.mkv");
+        assert!(found[0].is_group_leader());
+        assert_eq!(found[1].name(), "b.mkv");
+        assert!(!found[1].is_group_leader());
+    }
+
+    #[test]
+    fn process_age_comes_from_the_stat_start_time() {
+        // Field 22 (starttime) is 7000 ticks = 70 s after boot at 100 ticks/s; the command name has
+        // spaces and parentheses.
+        let stat = "123 (ffm (x) peg) S 1 123 123 0 -1 4194304 100 0 0 0 5 5 0 0 20 0 7 0 7000 99";
+        assert_eq!(age_from_stat(stat, 100.0, 100.0), Some(30));
+        assert_eq!(age_from_stat(stat, 50.0, 100.0), Some(0)); // never negative
+        assert_eq!(age_from_stat("garbage", 100.0, 100.0), None);
+    }
+
+    /// A real process whose command line looks like a capture ffmpeg: a copy of bash named
+    /// `ffmpeg`, so /proc shows the program name, `-f v4l2` and a `.mkv` output. The command is
+    /// compound so bash stays the process instead of exec'ing `sleep`.
+    fn spawn_fake_capture(dir: &Path, out: &Path) -> Child {
+        let prog = dir.join("ffmpeg");
+        fs::copy("/bin/bash", &prog).unwrap();
+        for _ in 0..100 {
+            let spawned = Command::new(&prog)
+                .args(["-c", "sleep 30; :", "-f", "v4l2"])
+                .arg(out)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .spawn();
+            match spawned {
+                Ok(c) => return c,
+                Err(e) if e.to_string().contains("Text file busy") => {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => panic!("spawn: {e}"),
+            }
+        }
+        panic!("the fake ffmpeg stayed busy");
+    }
+
+    #[test]
+    fn a_running_capture_is_found_adopted_and_stopped() {
+        let dir = TempDir::new("capture-orphan");
+        let logs = dir.0.join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        let out = dir.0.join("VHS_ARCHIVAL_2026-01-02_03-04-05.mkv");
+        let mut child = spawn_fake_capture(&dir.0, &out);
+        let pid = child.id() as i32;
+
+        let found = find_orphans()
+            .into_iter()
+            .find(|o| o.pid == pid)
+            .expect("the scan did not see the running capture");
+        assert_eq!(found.output, out);
+        assert!(found.is_group_leader());
+
+        let mut c = CaptureController::new();
+        c.adopt(&found, &logs).unwrap();
+        // The pgid file is what lets the capture be stopped by hand; poll removes it at the end.
+        fs::write(logs.join("capture.pgid"), format!("{pid}\n")).unwrap();
+        assert!(c.is_running());
+        c.poll();
+        assert!(
+            c.is_running(),
+            "an adopted capture that is alive must stay running"
+        );
+        assert!(
+            c.adopt(&found, &logs).is_err(),
+            "adopting twice must be refused"
+        );
+
+        c.stop();
+        assert!(
+            wait_until(|| {
+                c.poll();
+                !c.is_running()
+            }),
+            "the adopted capture did not end after stop()"
+        );
+        let _ = child.wait();
+        assert!(!logs.join("capture.pgid").exists());
+    }
+
+    #[test]
+    fn a_capture_sharing_its_group_cannot_be_adopted() {
+        let shared = OrphanCapture {
+            pid: 5,
+            pgid: 4,
+            output: PathBuf::from("/o/a.mkv"),
+            age_secs: 1,
+        };
+        let mut c = CaptureController::new();
+        assert!(c.adopt(&shared, Path::new("/tmp")).is_err());
+        assert!(!c.is_running());
+    }
+
+    #[test]
+    fn a_capture_records_its_pgid_for_manual_stops_and_removes_it_at_exit() {
+        let dir = TempDir::new("capture-pgidfile");
+        let stub = stub_ffmpeg(&dir.0);
+        let mut c = CaptureController::new();
+        start_stub(&mut c, &stub, &dir.0);
+        let file = dir.0.join("logs/capture.pgid");
+        let live = c.live_pgid.lock().unwrap().unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap().trim(), live.to_string());
+
+        c.stop();
+        assert!(wait_until(|| {
+            c.poll();
+            !c.is_running()
+        }));
+        assert!(
+            !file.exists(),
+            "the pgid file must go when the capture ends"
+        );
     }
 
     /// `text` with each listed `KEY=...` line replaced by `KEY="value"`.

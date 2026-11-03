@@ -1,9 +1,12 @@
 use std::time::{Duration, Instant};
 
-use crate::capture::CaptureController;
+use crate::capture::{self, CaptureController, OrphanCapture};
 use crate::config::Config;
 use crate::mpv_view::{MpvView, Source};
 use crate::v4l2::V4l2Controls;
+
+/// How often an idle panel looks for a capture it did not start.
+const ORPHAN_SCAN_EVERY: Duration = Duration::from_secs(3);
 
 #[derive(Debug, PartialEq)]
 pub enum CaptureState {
@@ -19,6 +22,11 @@ pub enum CaptureState {
 pub struct MonitorPanel {
     pub capture: CaptureController,
     pub state: CaptureState,
+    /// Capture ffmpegs already running that this process did not start (for example one that
+    /// outlived a GUI crash). They hold the grabber, so Monitor and Start Capture are replaced by
+    /// a banner offering to re-attach or stop them.
+    orphans: Vec<OrphanCapture>,
+    orphan_scan_due: Instant,
     releasing_at: Option<Instant>,
     /// True once the UDP preview stream has been opened in mpv.
     pub preview_opened: bool,
@@ -40,6 +48,8 @@ impl MonitorPanel {
         Self {
             capture: CaptureController::new(),
             state: CaptureState::Idle,
+            orphans: capture::find_orphans(),
+            orphan_scan_due: Instant::now() + ORPHAN_SCAN_EVERY,
             releasing_at: None,
             preview_opened: false,
             capture_last_reopen_at: None,
@@ -72,6 +82,9 @@ impl MonitorPanel {
     ) -> bool {
         let mut needs_refresh = false;
         match self.state {
+            CaptureState::Idle if !self.orphans.is_empty() => {
+                needs_refresh |= self.orphan_banner(ui, cfg, status);
+            }
             CaptureState::Idle => {
                 if ui.button("Monitor").clicked() {
                     let dev = cfg.v4l2_device.clone();
@@ -155,6 +168,15 @@ impl MonitorPanel {
         status: &mut String,
     ) -> bool {
         self.capture.poll();
+
+        // While idle, notice a capture that outlived its GUI (or was started elsewhere).
+        if self.state == CaptureState::Idle {
+            if Instant::now() >= self.orphan_scan_due {
+                self.orphans = capture::find_orphans();
+                self.orphan_scan_due = Instant::now() + ORPHAN_SCAN_EVERY;
+            }
+            ctx.request_repaint_after(ORPHAN_SCAN_EVERY);
+        }
 
         // Releasing → Capturing once mpv is idle or 1 s timeout.
         if self.state == CaptureState::Releasing {
@@ -242,6 +264,53 @@ impl MonitorPanel {
         } else {
             self.do_start_capture(cfg, status);
         }
+    }
+
+    /// The "a capture is already running" banner. Returns true when the library should refresh.
+    fn orphan_banner(&mut self, ui: &mut egui::Ui, cfg: &Config, status: &mut String) -> bool {
+        let Some(orphan) = self.orphans.first().cloned() else {
+            return false;
+        };
+        ui.label(
+            egui::RichText::new(format!(
+                "⚠ A capture is already running: {} (for {})",
+                orphan.name(),
+                fmt_secs(orphan.age_secs)
+            ))
+            .color(egui::Color32::YELLOW),
+        );
+        if orphan.is_group_leader()
+            && ui
+                .button("Reattach")
+                .on_hover_text("Show its progress, stop it from here, set a stop time")
+                .clicked()
+        {
+            match self.capture.adopt(&orphan, &cfg.log_dir()) {
+                Ok(()) => {
+                    self.orphans.clear();
+                    self.state = CaptureState::Capturing;
+                    self.preview_opened = false;
+                    self.capture_last_reopen_at = Some(Instant::now());
+                    self.capture_stop_input.clear();
+                    self.capture_stop_at = None;
+                    *status = "Reattached to the running capture".into();
+                }
+                Err(e) => *status = format!("Cannot reattach: {e}"),
+            }
+        }
+        if ui
+            .button("Stop it")
+            .on_hover_text("Interrupt ffmpeg so the file is finalized")
+            .clicked()
+        {
+            for o in &self.orphans {
+                o.stop();
+            }
+            self.orphan_scan_due = Instant::now() + Duration::from_secs(1);
+            *status = "Stopping the running capture…".into();
+            return true;
+        }
+        false
     }
 
     /// Returns true → caller should refresh the library.
