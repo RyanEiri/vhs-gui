@@ -295,6 +295,14 @@ fn prepare_spawn(
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
+    // A fresh install has no logs directory yet; without this every job failed with a bare
+    // "No such file or directory".
+    fs::create_dir_all(log_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "could not create the log directory {}: {e}",
+            log_dir.display()
+        )
+    })?;
     let log_path = log_dir.join(format!("{slug}_{ts}.log"));
     let log_file = fs::File::create(&log_path)?;
 
@@ -995,6 +1003,21 @@ mod reattach_tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn prepare_spawn_creates_a_missing_log_directory() {
+        let base = tmp_work_dir("logdir");
+        let log_dir = base.join("nested/logs");
+        assert!(!log_dir.exists());
+
+        // The input need not exist: probing failure falls back to unknown size.
+        prepare_spawn("log dir test", Path::new("/nonexistent/in.mkv"), &log_dir).unwrap();
+
+        assert!(log_dir.is_dir());
+        let logs: Vec<_> = fs::read_dir(&log_dir).unwrap().collect();
+        assert_eq!(logs.len(), 1, "one job log expected");
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
