@@ -5,8 +5,9 @@ use crate::library::{FileKind, Library};
 use crate::mpv_view::{MpvView, Source};
 use crate::pipeline::PipelineJob;
 use crate::settings::{
-    Backend, BrightnessPreset, CrushPreset, UpscaleSettings, preset_models_dirs,
+    Backend, BrightnessPreset, CrushPreset, UpscaleEngine, UpscaleSettings, preset_models_dirs,
 };
+use crate::upscale::plan::Variant;
 use crate::vs_ops::VsOp;
 
 struct UpscalePreviewTextures {
@@ -331,11 +332,24 @@ impl UpscalePanel {
                     ui.end_row();
                 }
 
-                // --- Denoise ---
-                ui.label("Denoise");
-                if ui.checkbox(&mut self.settings.denoise, "").changed() {
-                    changed = true;
-                }
+                // --- Engine ---
+                ui.label("Engine");
+                ui.horizontal(|ui| {
+                    let prev = self.settings.engine;
+                    ui.radio_value(&mut self.settings.engine, UpscaleEngine::Script, "Script");
+                    ui.radio_value(
+                        &mut self.settings.engine,
+                        UpscaleEngine::Native,
+                        "Native (beta)",
+                    )
+                    .on_hover_text(
+                        "The built-in engine, run as a detached worker. For now only the plain \
+                             Upscale buttons use it; Anime and B&W still run the script.",
+                    );
+                    if self.settings.engine != prev {
+                        changed = true;
+                    }
+                });
                 ui.end_row();
             });
         changed
@@ -817,7 +831,7 @@ impl UpscalePanel {
     fn launch_upscale(
         &mut self,
         label: String,
-        script: PathBuf,
+        variant: Variant,
         input: PathBuf,
         output: PathBuf,
         cfg: &Config,
@@ -853,6 +867,30 @@ impl UpscalePanel {
 
         Self::clear_stale_work_dir(&input, cfg, self.settings.selected_model());
 
+        // The native engine, run as a detached worker, for the variants it covers so far.
+        if self.settings.engine == UpscaleEngine::Native && variant == Variant::Standard {
+            let spec =
+                self.settings
+                    .to_job_spec(variant, &input, &output, &cfg.upscale_work_root());
+            match crate::upscale::start_worker(&spec, label, &cfg.log_dir()) {
+                Ok(job) => {
+                    let job = job.with_upscale_tracking(seg_dir, output, seg_secs);
+                    *status = format!("Started: {} (native engine)", job.label);
+                    self.last_preview_at = None;
+                    self.last_preview_frames = 0;
+                    self.preview_textures = None;
+                    self.pipeline = Some(job);
+                }
+                Err(e) => *status = format!("Failed to start job: {e}"),
+            }
+            return;
+        }
+
+        let script = match variant {
+            Variant::Standard => cfg.upscale_script(),
+            Variant::Anime => cfg.upscale_anime_script(),
+            Variant::Bw => cfg.upscale_bw_script(),
+        };
         let (mut owned_envs, owned_args) = self.settings.to_launch(&output);
         // WORK_ROOT must be passed explicitly: the bash script otherwise
         // resolves its own default independently of cfg.upscale_work_root(),
@@ -954,7 +992,7 @@ impl UpscalePanel {
                             let out = Self::upscale_output(&entry.path, cfg);
                             self.launch_upscale(
                                 format!("Upscale Video {}", entry.name),
-                                cfg.upscale_script(),
+                                Variant::Standard,
                                 entry.path.clone(),
                                 out,
                                 cfg,
@@ -965,7 +1003,7 @@ impl UpscalePanel {
                             let out = Self::upscale_output(&entry.path, cfg);
                             self.launch_upscale(
                                 format!("Upscale Video B&W {}", entry.name),
-                                cfg.upscale_bw_script(),
+                                Variant::Bw,
                                 entry.path.clone(),
                                 out,
                                 cfg,
@@ -988,7 +1026,7 @@ impl UpscalePanel {
                             let out = Self::upscale_output(&entry.path, cfg);
                             self.launch_upscale(
                                 format!("Upscale Film {}", entry.name),
-                                cfg.upscale_script(),
+                                Variant::Standard,
                                 entry.path.clone(),
                                 out,
                                 cfg,
@@ -999,7 +1037,7 @@ impl UpscalePanel {
                             let out = Self::upscale_output(&entry.path, cfg);
                             self.launch_upscale(
                                 format!("Upscale Film B&W {}", entry.name),
-                                cfg.upscale_bw_script(),
+                                Variant::Bw,
                                 entry.path.clone(),
                                 out,
                                 cfg,
@@ -1010,7 +1048,7 @@ impl UpscalePanel {
                             let out = Self::upscale_output(&entry.path, cfg);
                             self.launch_upscale(
                                 format!("Upscale Anime {}", entry.name),
-                                cfg.upscale_anime_script(),
+                                Variant::Anime,
                                 entry.path.clone(),
                                 out,
                                 cfg,
@@ -1030,7 +1068,7 @@ impl UpscalePanel {
                             let out = Self::upscale_output(&entry.path, cfg);
                             self.launch_upscale(
                                 format!("Upscale {}", entry.name),
-                                cfg.upscale_script(),
+                                Variant::Standard,
                                 entry.path.clone(),
                                 out,
                                 cfg,
@@ -1041,7 +1079,7 @@ impl UpscalePanel {
                             let out = Self::upscale_output(&entry.path, cfg);
                             self.launch_upscale(
                                 format!("Upscale B&W {}", entry.name),
-                                cfg.upscale_bw_script(),
+                                Variant::Bw,
                                 entry.path.clone(),
                                 out,
                                 cfg,
@@ -1052,7 +1090,7 @@ impl UpscalePanel {
                             let out = Self::upscale_output(&entry.path, cfg);
                             self.launch_upscale(
                                 format!("Upscale Anime {}", entry.name),
-                                cfg.upscale_anime_script(),
+                                Variant::Anime,
                                 entry.path.clone(),
                                 out,
                                 cfg,

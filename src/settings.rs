@@ -90,6 +90,17 @@ impl Backend {
     }
 }
 
+/// Which implementation runs an upscale job: the original bash script, or the native engine
+/// (`src/upscale/`, run as a detached `vhs-gui upscale-worker`). Script is the default until a
+/// real upscale has matched; see `docs/upscale-engine-design.md`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpscaleEngine {
+    #[default]
+    Script,
+    Native,
+}
+
 // -----------------------------------------------------------------------
 // Model discovery
 // -----------------------------------------------------------------------
@@ -187,7 +198,7 @@ pub struct UpscaleSettings {
     pub segment_secs: u32,
     pub backend: Backend,
     pub batch_size: u32,
-    pub denoise: bool,
+    pub engine: UpscaleEngine,
 }
 
 impl Default for UpscaleSettings {
@@ -210,7 +221,7 @@ impl Default for UpscaleSettings {
             segment_secs: 30,
             backend: Backend::Rocm,
             batch_size: 2,
-            denoise: false,
+            engine: UpscaleEngine::Script,
         }
     }
 }
@@ -315,10 +326,6 @@ impl UpscaleSettings {
             }
         }
 
-        if self.denoise {
-            envs.push(("DENOISE".into(), "1".into()));
-        }
-
         let args = vec![
             output_path.to_string_lossy().into_owned(),
             self.segment_secs.to_string(),
@@ -327,11 +334,110 @@ impl UpscaleSettings {
 
         (envs, args)
     }
+
+    /// The same job as [`to_launch`](Self::to_launch), as a spec for the native engine.
+    pub fn to_job_spec(
+        &self,
+        variant: crate::upscale::plan::Variant,
+        input: &std::path::Path,
+        output: &std::path::Path,
+        work_root: &std::path::Path,
+    ) -> crate::upscale::plan::JobSpec {
+        let mut spec = crate::upscale::plan::JobSpec::defaults(variant, input, output, work_root);
+        spec.segment_secs = self.segment_secs;
+        spec.crf = self.crf;
+        spec.backend = self.backend.clone();
+        if let Some(m) = self.selected_model() {
+            spec.model = m.into();
+        }
+        // The scripts only get MODELS_DIR for Vulkan and otherwise use their own default, which
+        // `JobSpec::defaults` already holds; keeping that makes the resume fingerprint match.
+        if self.backend == Backend::Vulkan {
+            spec.models_dir = self.effective_models_dir();
+        }
+        spec.internal_scale = u32::from(self.internal_scale);
+        spec.final_scale = u32::from(self.final_scale);
+        spec.crush = self.crush.env_value().into();
+        spec.brightness = self.brightness.env_value(&self.brightness_custom);
+        if self.backend == Backend::Rocm {
+            spec.batch_size = Some(self.batch_size);
+        }
+        spec
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::upscale::plan::Variant;
+    use std::path::Path;
+
+    /// The native engine must be handed the same job as the script: every value `to_launch` puts
+    /// in the script's environment and arguments has to be the matching field of the job spec.
+    #[test]
+    fn the_job_spec_matches_what_the_script_is_given() {
+        for backend in [Backend::Rocm, Backend::Vulkan] {
+            let s = UpscaleSettings {
+                backend: backend.clone(),
+                crush: CrushPreset::Medium,
+                brightness: BrightnessPreset::Custom,
+                brightness_custom: " 0.03 ".into(),
+                crf: 18,
+                segment_secs: 20,
+                batch_size: 3,
+                ..Default::default()
+            };
+            let (envs, args) = s.to_launch(Path::new("/out/o.mkv"));
+            let env = |k: &str| envs.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+            let spec = s.to_job_spec(
+                Variant::Standard,
+                Path::new("/in/i.mkv"),
+                Path::new("/out/o.mkv"),
+                Path::new("/work"),
+            );
+
+            assert_eq!(env("CRUSH").unwrap(), spec.crush);
+            assert_eq!(env("BRIGHTNESS").unwrap(), spec.brightness);
+            assert_eq!(env("BRIGHTNESS").unwrap(), "0.03"); // trimmed
+            assert_eq!(env("UPSCALE_BACKEND").unwrap(), spec.backend_name());
+            assert_eq!(
+                env("INTERNAL_SCALE").unwrap(),
+                spec.internal_scale.to_string()
+            );
+            assert_eq!(env("FINAL_SCALE").unwrap(), spec.final_scale.to_string());
+            if let Some(m) = env("MODEL") {
+                assert_eq!(m, spec.model);
+            }
+            assert_eq!(args, ["/out/o.mkv", "20", "18"]);
+            assert_eq!((spec.segment_secs, spec.crf), (20, 18));
+            match backend {
+                Backend::Rocm => {
+                    assert_eq!(env("BATCH_SIZE").unwrap(), "3");
+                    assert_eq!(spec.batch_size, Some(3));
+                    assert!(
+                        env("MODELS_DIR").is_none(),
+                        "the script gets no MODELS_DIR for ROCm"
+                    );
+                }
+                Backend::Vulkan => {
+                    assert_eq!(
+                        env("MODELS_DIR").unwrap(),
+                        spec.models_dir.to_string_lossy()
+                    );
+                    assert_eq!(spec.batch_size, None);
+                }
+            }
+            assert!(
+                env("DENOISE").is_none(),
+                "the dead DENOISE variable is gone"
+            );
+        }
+    }
+
+    #[test]
+    fn the_engine_defaults_to_the_script() {
+        assert_eq!(UpscaleSettings::default().engine, UpscaleEngine::Script);
+    }
 
     #[test]
     fn sync_scale_to_model_corrects_stale_scale_from_prior_model() {
