@@ -76,13 +76,24 @@ release, one PR takes it into `main`. Merge `main` into it when `main` moves (bu
 
 ## Phase 1b: document and check the external tools
 
-- [ ] `docs/INSTALL.md`, linked from the README: copy-paste install steps for ffmpeg, sox, libmpv,
-      VapourSynth (name the PPA), the vsrepo plugins and Python modules, and `realesrgan-ncnn-vulkan`.
-- [ ] Put the ROCm upscaler under version control (`driver.py`, `requirements.txt`, the
-      `realesrgan-rocm` shim; neither repo has them) with venv, PyTorch ROCm wheel and
-      `HSA_OVERRIDE_GFX_VERSION=11.0.0` steps.
-- [ ] Tools window: also check the VapourSynth plugins and Python modules, so a missing `havsfunc`
-      is reported plainly instead of failing inside vspipe.
+- [x] `docs/INSTALL.md`, linked from the README: install steps for ffmpeg, sox, libmpv, VapourSynth
+      (`ppa:savoury1/vapoursynth`, and `apt-mark manual` for the auto-installed `libpython3.12`
+      packages that `apt autoremove` would remove), the vsrepo plugins and modules,
+      `realesrgan-ncnn-vulkan`, and the model archives. Each step is marked tested or not.
+- [x] The ROCm upscaler is under version control in `tools/realesrgan-rocm/` (`driver.py` and the
+      shim copied byte for byte from the working install; `requirements.txt` updated to the
+      `rocm7.1` index and the installed versions), with venv, PyTorch wheel, group and
+      `HSA_OVERRIDE_GFX_VERSION` steps. The venv was not rebuilt from scratch to prove the steps.
+- [x] Tools window: a VapourSynth section (`src/vs_stack.rs`) checks that the six plugins, the nnedi3
+      weights file and the five Python modules exist, and says which operations need each.
+- [ ] **Fresh VapourSynth install on Ubuntu 26.04 has no tested path.** vsrepo needs a Python that
+      imports `vapoursynth`; R55 is a Python 3.12 build and 26.04 has no 3.12 interpreter, so
+      `vsrepo.py` stops with "Could not detect vapoursynth". Also, vsrepo's current `havsfunc` lists
+      `znedi3` where the installed copy uses `nnedi3`, so a fresh install may fetch a `havsfunc` the
+      scripts do not match. Settle together with the R55 to R81 migration (memory note
+      `vapoursynth-r55-python312`), then rewrite section 2b of INSTALL.md from a clean run.
+- [ ] Verify the ncnn zip layout, the model archive layouts, and rebuild the ROCm venv in a scratch
+      location to confirm the INSTALL.md commands as written.
 
 ## Phase 2: Viewer Encode (smallest script)
 
