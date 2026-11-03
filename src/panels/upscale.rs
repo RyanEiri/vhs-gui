@@ -684,6 +684,30 @@ impl UpscalePanel {
         }
     }
 
+    /// Launch the native viewer encode (H.264 + AAC derivative in `captures/viewer/`). An existing
+    /// viewer copy is left alone, as the script it replaces did.
+    fn launch_viewer_encode(&mut self, input: PathBuf, cfg: &Config, status: &mut String) {
+        let name = input
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("input")
+            .to_string();
+        match crate::viewer_encode::launch(&input, cfg, format!("Viewer Encode {name}")) {
+            Ok(crate::viewer_encode::Launch::Started(mut job, output)) => {
+                job.output_path = Some(output);
+                *status = format!("Started: {}", job.label);
+                self.pipeline = Some(*job);
+            }
+            Ok(crate::viewer_encode::Launch::Exists(output)) => {
+                *status = format!(
+                    "Viewer copy already exists, not overwritten: {}",
+                    output.display()
+                );
+            }
+            Err(e) => *status = format!("Failed to start job: {e}"),
+        }
+    }
+
     /// Launch native A/V drift correction (`fix_sync`). Output is written
     /// beside the input as `<stem>_SYNC.mkv`.
     fn launch_fix_sync(&mut self, input: PathBuf, cfg: &Config, status: &mut String) {
@@ -911,15 +935,7 @@ impl UpscalePanel {
                             self.launch_vs_op(VsOp::Vdecimate, entry.path.clone(), cfg, status);
                         }
                         if ui.button("Viewer Encode").clicked() {
-                            self.launch_pipeline(
-                                format!("Viewer Encode {}", entry.name),
-                                cfg.viewer_encode_script(),
-                                entry.path.clone(),
-                                &[],
-                                &[],
-                                cfg,
-                                status,
-                            );
+                            self.launch_viewer_encode(entry.path.clone(), cfg, status);
                         }
                         if ui.button("Upscale Video").clicked() {
                             let out = Self::upscale_output(&entry.path, cfg);
@@ -953,15 +969,7 @@ impl UpscalePanel {
                     }
                     FileKind::EditMasterVD => {
                         if ui.button("Viewer Encode").clicked() {
-                            self.launch_pipeline(
-                                format!("Viewer Encode {}", entry.name),
-                                cfg.viewer_encode_script(),
-                                entry.path.clone(),
-                                &[],
-                                &[],
-                                cfg,
-                                status,
-                            );
+                            self.launch_viewer_encode(entry.path.clone(), cfg, status);
                         }
                         if ui.button("Upscale Film").clicked() {
                             let out = Self::upscale_output(&entry.path, cfg);

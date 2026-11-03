@@ -105,10 +105,6 @@ impl Config {
     pub fn process_script(&self) -> PathBuf {
         self.scripts_dir.join("vhs_process.sh")
     }
-    // TODO(native-port): remove once Viewer Encode is natively ported.
-    pub fn viewer_encode_script(&self) -> PathBuf {
-        self.scripts_dir.join("vhs_viewer_encode.sh")
-    }
     // TODO(native-port): remove once Upscale is natively ported.
     pub fn upscale_script(&self) -> PathBuf {
         self.scripts_dir.join("vhs_upscale.sh")

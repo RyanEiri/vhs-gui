@@ -88,6 +88,11 @@ DISPLAY=:0 ./target/debug/vhs-gui
   toolbar warning. Never hardcode `/usr/bin/<tool>` or call `Command::new("ffmpeg")`; use
   `tools::command(Tool::X)` or `tools::require(Tool::X)?` before spawning. `/usr/bin` precedes
   `PATH` on purpose: `/usr/local/bin/ffmpeg` is the DeckLink build and must not be picked up here.
+- **`src/viewer_encode.rs`** — native port of `vhs_viewer_encode.sh` (Viewer Encode button). `plan` picks
+  the SD/VHS or HD preset from the source height, `ffmpeg_args` builds the argument list as a pure
+  function, `launch` returns `Started(job, output)` or `Exists(path)` (an existing viewer copy is never
+  overwritten). The ignored `matches_the_bash_script` test runs the real script with stub ffmpeg/ffprobe
+  and compares arguments; rerun it after any change here.
 - **`src/vs_stack.rs`** — presence check (not import) for the VapourSynth plugins and the havsfunc
   Python modules the scripts need; feeds the Tools window and toolbar warning. Keep `NEEDS` in step
   with the `vhs_plugins.load(...)` calls in `assets/vs/*.vpy` and the modules `havsfunc` imports.

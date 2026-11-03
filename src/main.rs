@@ -11,6 +11,7 @@ mod pipeline;
 mod settings;
 mod tools;
 mod v4l2;
+mod viewer_encode;
 mod vs_assets;
 mod vs_ops;
 mod vs_stack;

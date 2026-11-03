@@ -102,8 +102,19 @@ release, one PR takes it into `main`. Merge `main` into it when `main` moves (bu
 
 ## Phase 2: Viewer Encode (smallest script)
 
-- [ ] Port `vhs_viewer_encode.sh` to a native ffmpeg job (H.264/AAC MKV, CRF 18 default).
-- [ ] Remove `viewer_encode_script()`.
+- [x] `vhs_viewer_encode.sh` ported to `src/viewer_encode.rs`: one native ffmpeg job. Height <= 576
+      gets the SD/VHS preset (x264 CRF 18, fast, main@4.0, 640x480 Lanczos, 29.97); taller gets HD
+      (CRF 20, medium, high@4.1, no scale, CFR from the probe). AAC-LC 320k stereo 48 kHz. An existing
+      viewer copy is left alone, as before. The argument builder is a pure function.
+- [x] Golden test: with stub `ffprobe`/`ffmpeg` the real script and the Rust builder produce identical
+      ffmpeg arguments for 12 source shapes (`cargo test -- --ignored`, needs the vhs-cli checkout).
+      An end-to-end smoke test runs real ffmpeg on a generated clip and checks the codecs.
+- [x] `viewer_encode_script()` removed. Not ported, deliberately: the script's `MODE`, `DEINTERLACE`,
+      `V_*` and `A_*` environment overrides and its 2-pass ABR branch (the GUI never set them; ABR was
+      unreachable from the GUI).
+- [x] Found on the way and fixed separately: `prepare_spawn` never created the log directory, so every
+      job failed with a bare "No such file or directory" on a machine without `~/Videos/logs`.
+- [ ] Try the Viewer Encode button on a real Edit Master file in the GUI (not yet done).
 
 ## Phase 3: Denoise and Denoise+QTGMC
 
