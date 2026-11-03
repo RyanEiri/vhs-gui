@@ -11,6 +11,7 @@ use std::process::Command;
 
 use crate::config::Config;
 use crate::pipeline::PipelineJob;
+use crate::tools::{self, Tool};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VsOp {
@@ -92,16 +93,6 @@ struct Resolved {
     has_audio: bool,
 }
 
-fn find_in_path(name: &str) -> Option<PathBuf> {
-    let path_var = std::env::var("PATH").ok()?;
-    let home = std::env::var("HOME").unwrap_or_default();
-    let home_bin = format!("{home}/bin");
-    std::iter::once(home_bin.as_str())
-        .chain(path_var.split(':'))
-        .map(|dir| Path::new(dir).join(name))
-        .find(|p| p.is_file())
-}
-
 /// Validates inputs/tools exist and are runnable before anything is spawned —
 /// mirrors the bash scripts' `[[ -f ]]`/`[[ -x ]]` checks with the same error
 /// text, but fails fast with no half-started pipe.
@@ -115,12 +106,8 @@ fn preflight(op: VsOp, input: &Path, cfg: &Config) -> anyhow::Result<Resolved> {
         anyhow::bail!("{} not found: {}", op.vpy_filename(), vpy.display());
     }
 
-    let vspipe =
-        find_in_path("vspipe").ok_or_else(|| anyhow::anyhow!("vspipe not found in PATH"))?;
-    let ffmpeg = PathBuf::from("/usr/bin/ffmpeg");
-    if !ffmpeg.is_file() {
-        anyhow::bail!("ffmpeg not executable: {}", ffmpeg.display());
-    }
+    let vspipe = tools::require(Tool::Vspipe)?;
+    let ffmpeg = tools::require(Tool::Ffmpeg)?;
 
     let has_audio = if op.needs_audio_probe() {
         probe_has_audio(input)
@@ -139,7 +126,7 @@ fn preflight(op: VsOp, input: &Path, cfg: &Config) -> anyhow::Result<Resolved> {
 /// `ffprobe -select_streams a:0 -show_entries stream=index` — non-empty
 /// stdout means an audio stream is present. Mirrors `vhs_vdecimate.sh`.
 fn probe_has_audio(input: &Path) -> bool {
-    let out = Command::new("/usr/bin/ffprobe")
+    let out = tools::command(Tool::Ffprobe)
         .args([
             "-v",
             "error",

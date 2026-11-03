@@ -43,13 +43,18 @@ release, one PR takes it into `main`. Merge `main` into it when `main` moves (bu
 ## Phase 0: roadmap and groundwork
 
 - [x] `ROADMAP.md`, linked from the README.
-- [ ] `src/tools.rs`: one resolver for ffmpeg, ffprobe, sox, vspipe, realesrgan-rocm,
-      realesrgan-ncnn-vulkan. Order: settings override, bundled dir next to the executable,
-      `/usr/bin`, `PATH`. Replace every hardcoded path (`fix_sync.rs`, `audio_cleanup.rs`,
-      `vs_ops.rs`, `pipeline.rs`). Unit tests for the order.
-- [ ] Startup dependency check: a Tools panel or banner listing found and missing tools with
-      versions, so a missing tool fails before a job starts.
-- [ ] Fix the clippy `chunks_exact` warning at `src/main.rs:29`.
+- [x] `src/tools.rs`: one resolver for ffmpeg, ffprobe, sox, vspipe, realesrgan-rocm,
+      realesrgan-ncnn-vulkan. Order: `VHS_GUI_<TOOL>` override, bundled dir (`$APPDIR/usr/bin`,
+      `<exe>/../lib/vhs-gui/bin`), `/usr/bin`, `~/bin` + `PATH`. Every hardcoded path in
+      `fix_sync.rs`, `audio_cleanup.rs`, `vs_ops.rs` and `pipeline.rs` now goes through it.
+      Unit tests cover the order. The override is an environment variable; a GUI settings
+      field for it is not built.
+- [x] Startup dependency check: a background check feeds a Tools window (rail button) with
+      found/missing, path and version per tool, and a toolbar warning when something needed is
+      missing. `ffmpeg`, `ffprobe`, `sox` and `vspipe` fail with an actionable message before a
+      job spawns. The upscale scripts still find `realesrgan-*` on their own; a preflight for
+      them comes with Phase 5.
+- [x] Fix the clippy `chunks_exact` warning at `src/main.rs:29`.
 
 ## Phase 1: embed the VapourSynth assets
 
