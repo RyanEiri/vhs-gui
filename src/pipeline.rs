@@ -1206,6 +1206,7 @@ mod reattach_tests {
         job.poll();
         assert!(!job.done);
         assert!(job.exit_ok.is_none());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Regression test: a reattached job has no `script_log` (we don't know the
