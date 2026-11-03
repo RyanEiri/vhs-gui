@@ -172,7 +172,11 @@ for becoming fully self-contained and portable is in [`ROADMAP.md`](ROADMAP.md).
 ## System dependency notes
 
 - Requires the `libmpv2` runtime.
-- System `ffmpeg` 8.0.1 at `/usr/bin/ffmpeg`; SoX for the audio-cleanup chain.
+- System `ffmpeg` 8.0.1 at `/usr/bin/ffmpeg`; SoX for the audio-cleanup chain. Every external
+  tool is found through one resolver (`src/tools.rs`): a `VHS_GUI_<TOOL>` environment override
+  (`VHS_GUI_FFMPEG`, `_FFPROBE`, `_SOX`, `_VSPIPE`, `_REALESRGAN_ROCM`, `_REALESRGAN_NCNN`),
+  then a bundled copy, then `/usr/bin`, then `~/bin` and `PATH`. The 🔧 Tools window in the left
+  rail shows what was found and the version; the toolbar warns when something is missing.
 - `realesrgan-rocm` shim at `~/bin/realesrgan-rocm` for the ROCm upscale backend.
   Model weights aren't bundled with this repo — grab pre-packaged archives
   (official + community VHS-tuned, both `.pth` and ncnn formats) from

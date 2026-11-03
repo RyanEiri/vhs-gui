@@ -5,6 +5,7 @@ use crate::config::Config;
 use crate::mpv_view::MpvView;
 use crate::panels::ViewMode;
 use crate::panels::monitor::{CaptureState, MonitorPanel};
+use crate::panels::tools::ToolsPanel;
 use crate::panels::upscale::UpscalePanel;
 use crate::persist::AppSettings;
 
@@ -18,6 +19,7 @@ pub struct App {
     mpv: MpvView,
     monitor: MonitorPanel,
     upscale: UpscalePanel,
+    tools: ToolsPanel,
     view_mode: ViewMode,
     status: String,
     /// When Some, a settings save is due at this instant (debounced 750ms).
@@ -42,6 +44,7 @@ impl App {
 
         let mut monitor = MonitorPanel::new(&cfg);
         let mut upscale = UpscalePanel::new(&cfg);
+        let tools = ToolsPanel::new(&cc.egui_ctx);
         let mut view_mode = ViewMode::Monitor;
 
         // Restore remaining persisted settings; apply V4L2 preset to hardware on startup.
@@ -53,6 +56,7 @@ impl App {
         Ok(Self {
             monitor,
             upscale,
+            tools,
             mpv,
             view_mode,
             status: String::new(),
@@ -130,6 +134,19 @@ impl App {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(egui::RichText::new(&self.status).weak().small());
+                let problems = self.tools.problems();
+                if !problems.is_empty() {
+                    let warn = egui::RichText::new(format!("⚠ {} tool problem(s)", problems.len()))
+                        .color(egui::Color32::YELLOW)
+                        .small();
+                    if ui
+                        .add(egui::Button::new(warn).frame(false))
+                        .on_hover_text(problems.join("\n"))
+                        .clicked()
+                    {
+                        self.tools.open = true;
+                    }
+                }
             });
         });
     }
@@ -193,6 +210,14 @@ impl App {
                         .clicked()
                     {
                         self.paths_open = !self.paths_open;
+                    }
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    let tools_sel = egui::Button::selectable(self.tools.open, "🔧");
+                    if ui.add(tools_sel).on_hover_text("Tools").clicked() {
+                        self.tools.open = !self.tools.open;
                     }
 
                     ui.add_space(8.0);
@@ -377,6 +402,9 @@ impl eframe::App for App {
             self.upscale.refresh_library(&self.cfg);
         }
 
+        // Pick up the finished startup tool check.
+        self.tools.poll();
+
         // 4. Poll upscale/pipeline job (keeps running even when Monitor view is active).
         self.upscale.poll(ctx, &self.cfg, &mut self.status);
 
@@ -396,6 +424,10 @@ impl eframe::App for App {
 
         if self.paths_open {
             self.show_paths_window(ctx);
+        }
+
+        if self.tools.open {
+            self.tools.show_window(ctx);
         }
 
         // Monitor view: collapsible Input settings panel (V4L2 hardware controls).

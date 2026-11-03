@@ -10,6 +10,8 @@ use std::time::{Instant, SystemTime};
 
 use nix::unistd::Pid;
 
+use crate::tools::{self, Tool};
+
 pub struct PipelineJob {
     child: Option<Child>,
     /// The producer process (`vspipe`) in a two-process native pipe.  `child`
@@ -938,7 +940,7 @@ fn parse_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
 /// by QTGMC/VDecimate often store N/A for stream duration — the real value is
 /// in the container (format) section only.
 fn probe_video_info(path: &Path) -> (u64, f64) {
-    let out = Command::new("/usr/bin/ffprobe")
+    let out = tools::command(Tool::Ffprobe)
         .args([
             "-v",
             "error",

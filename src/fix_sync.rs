@@ -4,13 +4,10 @@
 //! ffprobe (4-level fallback) → arithmetic → one `ffmpeg` call.
 
 use std::path::Path;
-use std::process::Command;
 
 use crate::config::Config;
 use crate::pipeline::PipelineJob;
-
-const FFPROBE: &str = "/usr/bin/ffprobe";
-const FFMPEG: &str = "/usr/bin/ffmpeg";
+use crate::tools::{self, Tool};
 
 /// Below this drift percentage, correction isn't worth it (matches the bash
 /// script's threshold exactly).
@@ -22,7 +19,11 @@ fn ffprobe_field(input: &Path, selector: &str, entry: &str) -> Option<String> {
         args.extend(["-select_streams", selector]);
     }
     args.extend(["-show_entries", entry, "-of", "default=nk=1:nw=1"]);
-    let out = Command::new(FFPROBE).args(&args).arg(input).output().ok()?;
+    let out = tools::command(Tool::Ffprobe)
+        .args(&args)
+        .arg(input)
+        .output()
+        .ok()?;
     let s = String::from_utf8_lossy(&out.stdout);
     let line = s.lines().next()?.trim();
     if line.is_empty() {
@@ -121,12 +122,8 @@ pub fn launch(
     cfg: &Config,
     label: String,
 ) -> anyhow::Result<Option<PipelineJob>> {
-    if !Path::new(FFPROBE).is_file() {
-        anyhow::bail!("ffprobe not found: {FFPROBE}");
-    }
-    if !Path::new(FFMPEG).is_file() {
-        anyhow::bail!("ffmpeg not found: {FFMPEG}");
-    }
+    tools::require(Tool::Ffprobe)?;
+    tools::require(Tool::Ffmpeg)?;
     if !input.is_file() {
         anyhow::bail!("input not found: {}", input.display());
     }
@@ -142,7 +139,7 @@ pub fn launch(
     }
 
     let chain = build_atempo_chain(tempo);
-    let mut cmd = Command::new(FFMPEG);
+    let mut cmd = tools::command(Tool::Ffmpeg);
     cmd.args(["-y", "-i"])
         .arg(input)
         .args(["-map", "0:v:0", "-map", "0:a:0", "-c:v", "copy", "-af"])

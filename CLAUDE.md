@@ -82,6 +82,12 @@ DISPLAY=:0 ./target/debug/vhs-gui
   fixed native scale (e.g. `VHS-Sharpen-1x`) locks the internal scale, and
   `clamp_final_scale` keeps Final Scale something the scripts accept (<= and a
   divisor of the internal scale); both run at launch, not just in the panel.
+- **`src/tools.rs`** + **`src/panels/tools.rs`** — the single resolver for external tools
+  (`Tool`, `resolve`, `require`, `command`; order: `VHS_GUI_<TOOL>` override, bundled dir,
+  `/usr/bin`, `~/bin`+`PATH`) and the background startup check behind the Tools window and the
+  toolbar warning. Never hardcode `/usr/bin/<tool>` or call `Command::new("ffmpeg")`; use
+  `tools::command(Tool::X)` or `tools::require(Tool::X)?` before spawning. `/usr/bin` precedes
+  `PATH` on purpose: `/usr/local/bin/ffmpeg` is the DeckLink build and must not be picked up here.
 - **`src/mpv_view.rs`** — `MpvView` owns the leaked `&'static Mpv` and its
   `RenderContext`, GL thread only. Its `Drop` replaces the repaint callback with a
   zero-sized no-op before the context is freed: `libmpv2` frees the callback's
