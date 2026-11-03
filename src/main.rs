@@ -13,6 +13,7 @@ mod tools;
 mod v4l2;
 mod vs_assets;
 mod vs_ops;
+mod vs_stack;
 
 /// Decode the embedded icon PNG and return `egui::IconData`.
 /// Returns `None` on any decode error so startup isn't blocked.

@@ -1,22 +1,29 @@
 //! Startup tool check and the Tools window: which external programs vhs-gui found, where,
-//! and which version. The check spawns `--version` subprocesses, so it runs on a background
-//! thread and the UI polls for the result.
+//! and which version, plus the VapourSynth plugins and Python modules the scripts load. The
+//! check spawns `--version` subprocesses, so it runs on a background thread and the UI polls
+//! for the result.
 
 use crossbeam_channel::{Receiver, TryRecvError};
 
 use crate::tools::{self, ToolStatus};
+use crate::vs_stack::{self, Kind, StackStatus};
+
+struct Report {
+    tools: Vec<ToolStatus>,
+    stack: Vec<StackStatus>,
+}
 
 pub struct ToolsPanel {
     pub open: bool,
-    report: Vec<ToolStatus>,
-    rx: Option<Receiver<Vec<ToolStatus>>>,
+    report: Option<Report>,
+    rx: Option<Receiver<Report>>,
 }
 
 impl ToolsPanel {
     pub fn new(ctx: &egui::Context) -> Self {
         let mut panel = Self {
             open: false,
-            report: Vec::new(),
+            report: None,
             rx: None,
         };
         panel.recheck(ctx);
@@ -31,7 +38,10 @@ impl ToolsPanel {
         let (tx, rx) = crossbeam_channel::bounded(1);
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(tools::check_all());
+            let _ = tx.send(Report {
+                tools: tools::check_all(),
+                stack: vs_stack::check(),
+            });
             ctx.request_repaint();
         });
         self.rx = Some(rx);
@@ -42,7 +52,7 @@ impl ToolsPanel {
         let Some(rx) = &self.rx else { return };
         match rx.try_recv() {
             Ok(report) => {
-                self.report = report;
+                self.report = Some(report);
                 self.rx = None;
             }
             Err(TryRecvError::Empty) => {}
@@ -58,10 +68,12 @@ impl ToolsPanel {
     /// Problems with the toolset. Empty while the first check is still running, so the
     /// toolbar does not flash a warning at startup.
     pub fn problems(&self) -> Vec<String> {
-        if self.report.is_empty() {
+        let Some(r) = &self.report else {
             return Vec::new();
-        }
-        tools::problems(&self.report)
+        };
+        let mut out = tools::problems(&r.tools);
+        out.extend(vs_stack::problems(&r.stack));
+        out
     }
 
     pub fn show_window(&mut self, ctx: &egui::Context) {
@@ -72,15 +84,15 @@ impl ToolsPanel {
             .resizable(false)
             .collapsible(false)
             .show(ctx, |ui| {
-                if self.report.is_empty() {
+                let Some(report) = &self.report else {
                     ui.label("Checking…");
                     return;
-                }
+                };
                 egui::Grid::new("tools_grid")
                     .num_columns(4)
                     .spacing([12.0, 6.0])
                     .show(ui, |ui| {
-                        for s in &self.report {
+                        for s in &report.tools {
                             ui.label(s.tool.binary())
                                 .on_hover_text(format!("Used for: {}", s.tool.needed_for()));
                             match &s.path {
@@ -101,11 +113,48 @@ impl ToolsPanel {
                             ui.end_row();
                         }
                     });
+
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("VapourSynth plugins and modules").strong());
+                egui::Grid::new("vs_stack_grid")
+                    .num_columns(3)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        for s in &report.stack {
+                            let kind = match s.need.kind {
+                                Kind::Plugin => "plugin",
+                                Kind::Module => "module",
+                            };
+                            ui.label(s.need.name)
+                                .on_hover_text(format!("Needed for: {}", s.need.used_by));
+                            match &s.found {
+                                Some(p) => {
+                                    ui.label(egui::RichText::new("✓").color(egui::Color32::GREEN));
+                                    ui.label(egui::RichText::new(p.display().to_string()).small());
+                                }
+                                None => {
+                                    ui.label(
+                                        egui::RichText::new("⚠ missing")
+                                            .color(egui::Color32::YELLOW),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(format!("{kind}, see docs/INSTALL.md"))
+                                            .small()
+                                            .weak(),
+                                    );
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
+
                 ui.add_space(6.0);
                 ui.label(
                     egui::RichText::new(
                         "Override a path with VHS_GUI_FFMPEG, VHS_GUI_FFPROBE, VHS_GUI_SOX, \
-                         VHS_GUI_VSPIPE, VHS_GUI_REALESRGAN_ROCM or VHS_GUI_REALESRGAN_NCNN.",
+                         VHS_GUI_VSPIPE, VHS_GUI_REALESRGAN_ROCM or VHS_GUI_REALESRGAN_NCNN; \
+                         plugin directories with VS_PLUGIN_DIRS. Files are checked for \
+                         presence, not imported.",
                     )
                     .small()
                     .weak(),
