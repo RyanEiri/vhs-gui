@@ -1,0 +1,13 @@
+# Python packages for the ROCm Real-ESRGAN driver (driver.py). See docs/INSTALL.md.
+#
+# 1. Install PyTorch first, from the ROCm wheel index (the default PyPI wheel has no ROCm):
+#      pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.1
+# 2. Then the rest:
+#      pip install -r requirements.txt
+#
+# Known good (checked 2026-11-02): Python 3.14.4, torch 2.13.0+rocm7.1, torchvision 0.28.0+rocm7.1,
+# spandrel 0.4.2, numpy 2.5.2, pillow 12.3.0 (spandrel also pulls in einops and safetensors).
+
+spandrel>=0.4.0
+pillow>=10.0.0
+numpy>=1.24.0
