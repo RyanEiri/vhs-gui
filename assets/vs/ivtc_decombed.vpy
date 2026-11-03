@@ -1,5 +1,7 @@
-# Embedded copy of vhs-cli/vhs-env/tools/ivtc_decombed.vpy. Only the plugin loading differs:
-# plugins are found through vhs_plugins.py instead of absolute /home paths.
+# Embedded copy of vhs-cli/vhs-env/tools/ivtc_decombed.vpy. Two differences: plugins are found
+# through vhs_plugins.py instead of absolute /home paths, and the FrameEval callback reads the
+# pre-FrameEval clip (`base`). The original's lambda read `clip`, which by then is the FrameEval
+# clip itself, so any frame VFM did not flag as combed requested a frame of itself and vspipe hung.
 import os
 import vapoursynth as vs
 import vhs_plugins
@@ -33,10 +35,11 @@ qtgmc = haf.QTGMC(clip, Preset=DECOMB_PRESET, TFF=TFF, FPSDivisor=2, EdiMode="nn
 
 # Replace only combed frames with QTGMC output, leave clean frames untouched
 # VFM sets _Combed=1 on frames it couldn't cleanly match
+base = clip
 clip = core.std.FrameEval(
-    clip,
-    lambda n, f: qtgmc if f.props.get("_Combed", 0) == 1 else clip,
-    prop_src=clip,
+    base,
+    lambda n, f: qtgmc if f.props.get("_Combed", 0) == 1 else base,
+    prop_src=base,
 )
 
 # VDecimate: removes the duplicate frame from each 5-frame telecine group (30fps → 24fps)
