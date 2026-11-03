@@ -254,6 +254,24 @@ mod tests {
             .collect()
     }
 
+    /// A scratch directory that is removed when dropped, so a failing assertion cannot leave it behind.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            TempDir(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn sd_sources_get_the_vhs_preset_at_the_576_line_boundary() {
         for (w, h) in [(720, 480), (640, 480), (720, 576), (768, 576)] {
@@ -370,9 +388,8 @@ mod tests {
     #[test]
     #[ignore]
     fn end_to_end_smoke() {
-        let dir = std::env::temp_dir().join(format!("vhs-gui-viewer-e2e-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let guard = TempDir::new("vhs-gui-viewer-e2e");
+        let dir = guard.0.clone();
         let cfg = Config {
             videos_dir: dir.clone(),
             ..Config::default()
@@ -440,7 +457,6 @@ mod tests {
             launch(&input, &cfg, "again".into()),
             Ok(Launch::Exists(_))
         ));
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Runs the real `vhs_viewer_encode.sh` with stub ffprobe/ffmpeg binaries that record what they
@@ -452,9 +468,8 @@ mod tests {
         let script = Config::default().scripts_dir.join("vhs_viewer_encode.sh");
         assert!(script.is_file(), "script missing: {}", script.display());
 
-        let dir = std::env::temp_dir().join(format!("vhs-gui-viewer-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let guard = TempDir::new("vhs-gui-viewer");
+        let dir = guard.0.clone();
         let stub = |name: &str, body: &str| {
             let p = dir.join(name);
             fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
@@ -507,6 +522,5 @@ mod tests {
             let ours = strings(&ffmpeg_args(&input, &output, &plan(&source)));
             assert_eq!(ours, from_script, "{w}x{h} @ {rate}");
         }
-        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -144,6 +144,24 @@ mod tests {
             .collect()
     }
 
+    /// A scratch directory that is removed when dropped, so a failing assertion cannot leave it behind.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            TempDir(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     fn nproc() -> String {
         std::thread::available_parallelism()
             .map(|n| n.get())
@@ -223,9 +241,8 @@ mod tests {
         let script = Config::default().scripts_dir.join("vhs_denoise.sh");
         assert!(script.is_file(), "script missing: {}", script.display());
 
-        let dir = std::env::temp_dir().join(format!("vhs-gui-denoise-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let guard = TempDir::new("vhs-gui-denoise");
+        let dir = guard.0.clone();
         let stub = |name: &str, body: &str| {
             let p = dir.join(name);
             fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
@@ -294,7 +311,6 @@ mod tests {
             })
             .collect();
         assert_eq!(ours, from_script);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The real `launch` path with real ffmpeg and sox on a generated clip with a loud tone:
@@ -303,9 +319,8 @@ mod tests {
     #[test]
     #[ignore]
     fn end_to_end_smoke() {
-        let dir = std::env::temp_dir().join(format!("vhs-gui-denoise-e2e-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let guard = TempDir::new("vhs-gui-denoise-e2e");
+        let dir = guard.0.clone();
         let cfg = Config {
             videos_dir: dir.clone(),
             ..Config::default()
@@ -421,6 +436,5 @@ mod tests {
             })
             .count();
         assert_eq!(leftovers, 0, "work dir not cleaned up");
-        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -140,9 +140,12 @@ release, one PR takes it into `main`. Merge `main` into it when `main` moves (bu
       the `DENOISE_PRESET`/`NOISE_*`/`NR_AMOUNT`/`NORM_DB`/`FFMPEG_THREADS`/`REBASING_MODE`,
       `FORCE_*`, `REDO_*`, `SKIP_QTGMC`, `QTGMC_FRAMES` and `VPY` overrides, the idet auto-decision
       (the script's `FORCE_QTGMC` defaulted to 1, so it never ran), and the dormant `noisered` branch.
-- [ ] Try Denoise and Denoise+QTGMC in the GUI on a real archival capture. Known differences to expect:
-      the Denoise bar pulses (a sequence has no single progress stream); QTGMC stage uses `vs_ops`'
-      ffmpeg arguments (`-shortest`, explicit y4m input) rather than the script's.
+- [x] Tried in the GUI on a real archival capture (2026-11-03, debug build): Denoise ran its three
+      stages, Denoise+QTGMC started QTGMC by itself after the denoise, and cancelling a
+      Denoise+QTGMC mid-denoise did not start QTGMC (log stops at the first stage, no QTGMC log
+      follows). Known differences: the Denoise bar pulses (a sequence has no single progress
+      stream), and the QTGMC stage uses `vs_ops`' ffmpeg arguments (`-shortest`, explicit y4m
+      input) rather than the script's.
 
 ## Phase 4: capture
 
