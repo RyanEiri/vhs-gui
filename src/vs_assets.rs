@@ -154,6 +154,18 @@ mod tests {
     }
 
     #[test]
+    fn ivtc_decombed_callback_does_not_read_its_own_output() {
+        let body = FILES
+            .iter()
+            .find(|(n, _)| *n == "ivtc_decombed.vpy")
+            .unwrap()
+            .1;
+        // `else clip` inside the FrameEval lambda reads the FrameEval clip itself and deadlocks.
+        assert!(!body.contains("else clip"));
+        assert!(body.contains("else base"));
+    }
+
+    #[test]
     fn scripts_are_portable() {
         for (name, body) in FILES {
             assert!(!body.contains("/home/"), "{name} hardcodes a home path");
