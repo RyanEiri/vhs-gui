@@ -68,6 +68,11 @@ release, one PR takes it into `main`. Merge `main` into it when `main` moves (bu
 - [x] `Config::tools_dir` removed; QTGMC, IVTC, VDecimate and Field Align no longer read the vhs-cli
       checkout. Frame hashes of the embedded scripts match vhs-cli's for QTGMC, IVTC, Field Align
       and VDecimate on a test clip.
+- [x] **Tested on a real capture through the GUI (2026-11-03, debug build, R55).** QTGMC, IVTC,
+      IVTC+Decomb, Field Align and Fix A/V Sync all ran to completion on a short denoised capture and
+      the results looked right; the embedded scripts were the ones executed (`vspipe` pointed at
+      `~/.cache/vhs-gui/vs/<hash>/`). IVTC+Decomb no longer hangs. Not tested: VDecimate (needs an
+      `EDIT_MASTER*.mkv`), and IVTC+Decomb's combed-frame branch on telecined film.
 - [ ] **Decision: embed the havsfunc stack?** Not done. The copy in vhs-cli is not the one that
       runs (it calls `core.znedi3` and has a syntax error); the working one is the vsrepo copy in
       `~/.local/share/vsrepo/py`. Upstream licences: `vsutil` MIT, `havsfunc` Unlicense,
@@ -128,6 +133,38 @@ release, one PR takes it into `main`. Merge `main` into it when `main` moves (bu
 - [ ] Keep the bash path selectable until one real tape upscale has matched.
 - [ ] Remove the three `upscale*_script()` accessors, `scripts_dir`, the "Scripts dir" field, and the
       "Transitional bash dependency" section of CLAUDE.md.
+
+## Phase 6a: two packages, Ubuntu 24.04 (R55) and 26.04 (R81)
+
+Idea: one source tree, two `.deb`s built per release in a clean container. The Rust binary is the
+same; the packages differ in how VapourSynth is supplied. Spike results (2026-11-02, scratch venv,
+nothing on the system changed):
+
+- **24.04, R55, Python 3.12:** works today. `Depends:` on the `savoury1/vapoursynth` PPA packages (a
+  `.deb` cannot add a PPA, so the docs must say so).
+- **26.04, R81, Python 3.14:** Ubuntu 26.04's archive has no VapourSynth. R81 is a PyPI `abi3` wheel
+  (6.4 MB, ships `vspipe` and the libraries, LGPL) that runs under Python 3.14 and could be bundled.
+  R81 dropped API 3 plugins, so the vsrepo `libmvtools.so` and `libnnedi3.so` do not load. PyPI has
+  prebuilt Linux wheels for the API 4 replacements: `vapoursynth-mvtools` 29 and
+  `vapoursynth-znedi3` 3.3 (both GPL-2.0), and `vapoursynth-vivtc` 2.0. ffms2 and fmtconv have no
+  Linux wheel on PyPI, and miscfilters is not on PyPI; the existing vsrepo builds of those three
+  load under R81.
+- **Measured:** QTGMC `Slower` on 8 s of real interlaced footage, R81 vs R55: PSNR 52.4 dB average
+  (worst 48.9), SSIM 0.998, same speed (about 110 fps). Needed an installed `havsfunc` patched from
+  `core.nnedi3.nnedi3` to `core.znedi3.nnedi3` (3 lines) and no explicit loads for the two plugins
+  (R81 autoloads its own plugin folder). VDecimate, IVTC and Field Align were frame-identical to R55.
+
+- [ ] `vhs_plugins.py` (and `vs_stack.rs`) also look in R81's plugin folder
+      (`vapoursynth.get_plugin_dir()`); no behaviour change on R55.
+- [ ] A `znedi3` variant of the QTGMC and IVTC+Decomb scripts for R81, chosen at runtime by the
+      detected VapourSynth version.
+- [ ] First-run `vapoursynth config` for a bundled R81 (writes `~/.config/vapoursynth/vapoursynth.toml`,
+      keyed by `libvsscript.so` path, so it coexists with R55); a package install script cannot do it.
+- [ ] Decide the `havsfunc` source for R81 (patched copy vs upstream 34, which needs `vsjetpack` and
+      is untested) and confirm licences for `mvsfunc`, `nnedi3_resample` and `adjust`.
+- [ ] Run QTGMC on a real VHS capture under R81 (the spike used a downscaled, interlaced slice of a
+      DVR recording because the captures folder was empty).
+- [ ] `cargo-deb` metadata and a clean-container build for each release; one `.deb` per series.
 
 ## Phase 6: portable package
 
