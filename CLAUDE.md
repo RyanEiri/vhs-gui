@@ -88,6 +88,11 @@ DISPLAY=:0 ./target/debug/vhs-gui
   toolbar warning. Never hardcode `/usr/bin/<tool>` or call `Command::new("ffmpeg")`; use
   `tools::command(Tool::X)` or `tools::require(Tool::X)?` before spawning. `/usr/bin` precedes
   `PATH` on purpose: `/usr/local/bin/ffmpeg` is the DeckLink build and must not be picked up here.
+- **`src/denoise.rs`** — native port of `vhs_denoise.sh` + `denoise.sh` (Denoise button): a three-step
+  `SeqStep` sequence (extract WAV, `sox norm -2`, remux) built by the pure `steps`, sharing
+  `extract_full_args`/`remux_args` with `audio_cleanup.rs`. Denoise+QTGMC is this job with QTGMC chained
+  after it by `UpscalePanel::chain_after` (see `chained_next`). The ignored `matches_the_bash_script`
+  test compares against the real script with stub tools; rerun it after changes.
 - **`src/viewer_encode.rs`** — native port of `vhs_viewer_encode.sh` (Viewer Encode button). `plan` picks
   the SD/VHS or HD preset from the source height, `ffmpeg_args` builds the argument list as a pure
   function, `launch` returns `Started(job, output)` or `Exists(path)` (an existing viewer copy is never

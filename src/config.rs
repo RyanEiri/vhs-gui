@@ -97,14 +97,6 @@ impl Config {
     pub fn capture_script(&self) -> PathBuf {
         self.scripts_dir.join("vhs_capture_ffmpeg.sh")
     }
-    // TODO(native-port): remove once Denoise is natively ported.
-    pub fn denoise_script(&self) -> PathBuf {
-        self.scripts_dir.join("vhs_denoise.sh")
-    }
-    // TODO(native-port): remove once Denoise+QTGMC is natively ported.
-    pub fn process_script(&self) -> PathBuf {
-        self.scripts_dir.join("vhs_process.sh")
-    }
     // TODO(native-port): remove once Upscale is natively ported.
     pub fn upscale_script(&self) -> PathBuf {
         self.scripts_dir.join("vhs_upscale.sh")

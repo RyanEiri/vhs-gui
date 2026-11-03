@@ -23,6 +23,10 @@ pub struct UpscalePanel {
     pub settings: UpscaleSettings,
     pub settings_panel_open: bool,
     pipeline: Option<PipelineJob>,
+    /// A VapourSynth op to start on the running job's output when it finishes successfully
+    /// (Denoise+QTGMC is a Denoise job with QTGMC chained after it). Taken on every completion,
+    /// so a failed or cancelled job never starts the next stage.
+    chain_after: Option<VsOp>,
     confirm_delete: Option<PathBuf>,
     rename_state: Option<(PathBuf, String)>,
     /// File the inline Audio Cleanup panel is open for, and its params.
@@ -43,6 +47,7 @@ impl UpscalePanel {
             settings: UpscaleSettings::default(),
             settings_panel_open: false,
             pipeline: None,
+            chain_after: None,
             confirm_delete: None,
             rename_state: None,
             audio_cleanup_state: None,
@@ -505,7 +510,9 @@ impl UpscalePanel {
             // resets the index — otherwise the action panel (and its Rename
             // button) vanishes and the user has to re-click the row.
             let reselect_path = job.output_path.clone();
-            let finish_status = if job_failed(job.exit_ok, &job.output_path) {
+            let failed = job_failed(job.exit_ok, &job.output_path);
+            let chained = self.chain_after.take();
+            let finish_status = if failed {
                 format!("{} FAILED — see log", job.label)
             } else if job.is_upscale {
                 cleanup_upscale_work_dir(&job.output_path, &job.segments_dir)
@@ -520,8 +527,11 @@ impl UpscalePanel {
             self.preview_textures = None;
             self.pipeline = None;
             self.library.refresh(cfg);
-            if let Some(p) = reselect_path {
-                self.library.selected = self.library.entries.iter().position(|e| e.path == p);
+            if let Some(p) = &reselect_path {
+                self.library.selected = self.library.entries.iter().position(|e| &e.path == p);
+            }
+            if let Some((op, next_input)) = chained_next(failed, chained, reselect_path) {
+                self.launch_vs_op(op, next_input, cfg, status);
             }
         }
     }
@@ -644,21 +654,36 @@ impl UpscalePanel {
     // Launch helpers
     // -----------------------------------------------------------------------
 
-    #[allow(clippy::too_many_arguments)]
-    fn launch_pipeline(
+    /// Launch the native Denoise (`captures/stabilized/<stem>_<time>_STABLE.mkv`). With `then`, that
+    /// VapourSynth op is started on the denoised file once this job succeeds.
+    fn launch_denoise(
         &mut self,
-        label: String,
-        script: PathBuf,
         input: PathBuf,
-        envs: &[(&str, &str)],
-        extra_args: &[&str],
+        then: Option<VsOp>,
         cfg: &Config,
         status: &mut String,
     ) {
-        match PipelineJob::start(label, &script, &input, envs, extra_args, &cfg.log_dir()) {
-            Ok(job) => {
+        let name = input
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("input")
+            .to_string();
+        let label = match then {
+            Some(op) => format!("Denoise+{} {name}", op.label_verb()),
+            None => format!("Denoise {name}"),
+        };
+        match crate::denoise::launch(&input, cfg, label) {
+            Ok(crate::denoise::Launch::Started(mut job, output)) => {
+                job.output_path = Some(output);
                 *status = format!("Started: {}", job.label);
-                self.pipeline = Some(job);
+                self.chain_after = then;
+                self.pipeline = Some(*job);
+            }
+            Ok(crate::denoise::Launch::Exists(output)) => {
+                *status = format!(
+                    "Denoised copy already exists, not overwritten: {}",
+                    output.display()
+                );
             }
             Err(e) => *status = format!("Failed to start job: {e}"),
         }
@@ -885,32 +910,20 @@ impl UpscalePanel {
                 match entry.kind {
                     FileKind::Archival => {
                         if ui.button("Denoise").clicked() {
-                            self.launch_pipeline(
-                                format!("Denoise {}", entry.name),
-                                cfg.denoise_script(),
-                                entry.path.clone(),
-                                &[],
-                                &[],
-                                cfg,
-                                status,
-                            );
+                            self.launch_denoise(entry.path.clone(), None, cfg, status);
                         }
                         if ui.button("Denoise+QTGMC").clicked() {
-                            // vhs_process.sh resolves its own DENOISE_SH/VPY via
-                            // SCRIPTS_DIR internally — pass it explicitly so a
-                            // GUI-configured scripts_dir actually reaches it,
-                            // rather than the script falling back to its own
-                            // hardcoded default.
-                            let scripts_dir = cfg.scripts_dir.to_string_lossy().into_owned();
-                            self.launch_pipeline(
-                                format!("Denoise+QTGMC {}", entry.name),
-                                cfg.process_script(),
-                                entry.path.clone(),
-                                &[("NO_LAUNCH", "1"), ("SCRIPTS_DIR", &scripts_dir)],
-                                &[],
-                                cfg,
-                                status,
-                            );
+                            if entry.name.ends_with("_STABLE.mkv") {
+                                // Already denoised: vhs_process.sh skipped straight to QTGMC.
+                                self.launch_vs_op(VsOp::Qtgmc, entry.path.clone(), cfg, status);
+                            } else {
+                                self.launch_denoise(
+                                    entry.path.clone(),
+                                    Some(VsOp::Qtgmc),
+                                    cfg,
+                                    status,
+                                );
+                            }
                         }
                     }
                     FileKind::Stabilized => {
@@ -1400,6 +1413,19 @@ impl UpscalePanel {
 // Free helpers
 // -----------------------------------------------------------------------
 
+/// What to start when a job finishes: the chained VapourSynth op, on the finished job's output.
+/// Only after success: a failed or cancelled Denoise must never start QTGMC on a partial file.
+fn chained_next(
+    failed: bool,
+    chained: Option<VsOp>,
+    output: Option<PathBuf>,
+) -> Option<(VsOp, PathBuf)> {
+    match (failed, chained, output) {
+        (false, Some(op), Some(path)) => Some((op, path)),
+        _ => None,
+    }
+}
+
 /// True if a finished job should be reported as failed: a non-zero exit
 /// (native jobs only — bash jobs don't check exit codes today), or a
 /// tracked output_path that never actually appeared. Untracked (None)
@@ -1504,8 +1530,23 @@ fn suggest_viewer_name(path: &std::path::Path) -> String {
 
 #[cfg(test)]
 mod job_failed_tests {
-    use super::job_failed;
+    use super::{chained_next, job_failed};
+    use crate::vs_ops::VsOp;
     use std::path::PathBuf;
+
+    #[test]
+    fn chained_op_starts_only_after_a_successful_job() {
+        let out = || Some(PathBuf::from("/s/clip_STABLE.mkv"));
+        assert_eq!(
+            chained_next(false, Some(VsOp::Qtgmc), out()),
+            Some((VsOp::Qtgmc, PathBuf::from("/s/clip_STABLE.mkv")))
+        );
+        // A failed or cancelled job never starts the next stage.
+        assert_eq!(chained_next(true, Some(VsOp::Qtgmc), out()), None);
+        // Nothing chained, or nothing to chain onto.
+        assert_eq!(chained_next(false, None, out()), None);
+        assert_eq!(chained_next(false, Some(VsOp::Qtgmc), None), None);
+    }
 
     #[test]
     fn nonzero_exit_is_failure_even_with_output_present() {

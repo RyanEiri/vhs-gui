@@ -121,11 +121,28 @@ release, one PR takes it into `main`. Merge `main` into it when `main` moves (bu
 
 ## Phase 3: Denoise and Denoise+QTGMC
 
-- [ ] Port `vhs_denoise.sh` and `denoise.sh` as a `SeqStep` sequence reusing `audio_cleanup.rs`
-      (video bit-exact copy, PCM audio).
-- [ ] Port `vhs_process.sh`: denoise, idet sample, QTGMC through `vs_ops`. `FORCE_QTGMC`,
-      `SKIP_QTGMC` and `REDO_*` become GUI options.
-- [ ] Remove `denoise_script()` and `process_script()`.
+- [x] `vhs_denoise.sh` + `denoise.sh` ported to `src/denoise.rs` as a three-step `SeqStep` sequence:
+      extract audio to WAV, `sox norm -2`, mux with the video copied bit-exact and PCM audio. It runs
+      the script's defaults, which means `NOISERED_ENABLE=0`: the shipped "denoise" is a 20 Hz
+      high-pass, a timestamp rebase and 48 kHz stereo, plus the normalize (Audio Cleanup is the
+      noise-reduction tool). The extract and mux commands are shared with `audio_cleanup.rs`
+      (`extract_full_args`, `remux_args`). Output `captures/stabilized/<stem>_<HH-MM-SS>_STABLE.mkv`.
+- [x] Denoise+QTGMC is a Denoise job with the native QTGMC job chained after it: when the denoise
+      succeeds the panel starts QTGMC on its output (`chain_after`, `chained_next`), and a failed or
+      cancelled denoise never does. This gives each stage its own progress bar and reuses the tested
+      `vs_ops` pipe. An input already named `*_STABLE.mkv` goes straight to QTGMC, as the script did.
+- [x] Golden test: with stub `ffmpeg`/`sox`, the real `vhs_denoise.sh` and the Rust steps make the same
+      calls. One deliberate difference, stated in the test: the script copies `full.wav` to
+      `clean.wav` before normalizing (noise reduction off); we normalize `full.wav` directly and skip
+      that copy (about 1.3 GB for a 2 h tape). End-to-end test on a generated clip: video kept, 48 kHz
+      stereo PCM, peak at -2 dBFS, scratch directory removed.
+- [x] `denoise_script()`, `process_script()` and the now-unused `launch_pipeline` removed. Not ported:
+      the `DENOISE_PRESET`/`NOISE_*`/`NR_AMOUNT`/`NORM_DB`/`FFMPEG_THREADS`/`REBASING_MODE`,
+      `FORCE_*`, `REDO_*`, `SKIP_QTGMC`, `QTGMC_FRAMES` and `VPY` overrides, the idet auto-decision
+      (the script's `FORCE_QTGMC` defaulted to 1, so it never ran), and the dormant `noisered` branch.
+- [ ] Try Denoise and Denoise+QTGMC in the GUI on a real archival capture. Known differences to expect:
+      the Denoise bar pulses (a sequence has no single progress stream); QTGMC stage uses `vs_ops`'
+      ffmpeg arguments (`-shortest`, explicit y4m input) rather than the script's.
 
 ## Phase 4: capture
 
