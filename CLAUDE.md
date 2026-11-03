@@ -71,7 +71,12 @@ DISPLAY=:0 ./target/debug/vhs-gui
   field arms it at capture start and "Stop after"/Set re-arms it up or down at any time. ffmpeg
   itself runs with a fixed 6 h `-t` backstop (`FFMPEG_HARD_SAFETY_CAP`) because its own `-t` can't
   be changed once running; "Cap" is disabled while capturing. Progress is read from the last 8 KiB
-  of the log, split on `\r` as well as `\n`.
+  of the log, split on `\r` as well as `\n`. A capture outlives a GUI crash by design (own process
+  group, 6 h backstop), so `find_orphans` scans `/proc` for capture ffmpegs this process did not
+  start (program `ffmpeg`, `-f v4l2` input, `.mkv` output); the monitor panel shows a banner with
+  Reattach (`CaptureController::adopt`, group leaders only) and Stop it, and replaces Monitor/Start
+  Capture while one is running because it holds the grabber. `logs/capture.pgid` is written for
+  manual stops (`kill -INT -$(cat ~/Videos/logs/capture.pgid)`).
 - **`src/panels/upscale.rs`** — file library, per-`FileKind` action buttons
   (`launch_pipeline`/`launch_upscale`), upscale settings panel, before/after preview.
 - **`src/library.rs`** — categorizes files into Viewer / EditMasterVD / EditMaster /
