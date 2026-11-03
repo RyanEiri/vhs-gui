@@ -8,6 +8,7 @@
 //! Unlike `fix_sync.rs` (one ffmpeg call), this is a *sequence* of
 //! independent processes — see `PipelineJob::start_native_sequence`.
 
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -134,12 +135,64 @@ pub fn output_path(input: &Path) -> PathBuf {
     dir.join(cleaned)
 }
 
-fn unique_work_dir() -> PathBuf {
+/// A fresh scratch directory path under the system temp dir (not created).
+pub(crate) fn unique_work_dir(prefix: &str) -> PathBuf {
     let ts = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    std::env::temp_dir().join(format!("vhs-gui-audiocleanup-{}-{ts}", std::process::id()))
+    std::env::temp_dir().join(format!("vhs-gui-{prefix}-{}-{ts}", std::process::id()))
+}
+
+/// ffmpeg arguments that extract the first audio stream as 48 kHz stereo PCM WAV with the
+/// shared high-pass and timestamp-rebase chain. Shared with Denoise (`denoise.rs`), whose script
+/// builds the same command.
+pub(crate) fn extract_full_args(input: &Path, wav: &Path) -> Vec<OsString> {
+    let mut a: Vec<OsString> = Vec::new();
+    for s in ["-hide_banner", "-nostdin", "-y", "-fflags", "+genpts", "-i"] {
+        a.push(s.into());
+    }
+    a.push(input.into());
+    for s in ["-vn", "-map", "0:a:0", "-af"] {
+        a.push(s.into());
+    }
+    a.push(af_chain().into());
+    for s in ["-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le", "-threads"] {
+        a.push(s.into());
+    }
+    a.push(threads().into());
+    a.push(wav.into());
+    a
+}
+
+/// ffmpeg arguments that copy the video bit-exact from `input` and replace its audio with `wav`.
+pub(crate) fn remux_args(input: &Path, wav: &Path, output: &Path) -> Vec<OsString> {
+    let mut a: Vec<OsString> = Vec::new();
+    for s in ["-hide_banner", "-nostdin", "-y", "-fflags", "+genpts", "-i"] {
+        a.push(s.into());
+    }
+    a.push(input.into());
+    for s in ["-fflags", "+genpts", "-i"] {
+        a.push(s.into());
+    }
+    a.push(wav.into());
+    for s in [
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "pcm_s16le",
+        "-avoid_negative_ts",
+        "make_zero",
+        "-shortest",
+    ] {
+        a.push(s.into());
+    }
+    a.push(output.into());
+    a
 }
 
 /// Build the stage pipeline and hand it to `PipelineJob::start_native_sequence`.
@@ -159,7 +212,7 @@ pub fn launch(
         fs::create_dir_all(dir)?;
     }
 
-    let work_dir = unique_work_dir();
+    let work_dir = unique_work_dir("audiocleanup");
     fs::create_dir_all(&work_dir)?;
 
     let full_wav = work_dir.join("full.wav");
@@ -173,22 +226,7 @@ pub fn launch(
     let th = threads();
 
     let mut extract_full = tools::command(Tool::Ffmpeg);
-    extract_full
-        .args(["-hide_banner", "-nostdin", "-y", "-fflags", "+genpts", "-i"])
-        .arg(input)
-        .args(["-vn", "-map", "0:a:0", "-af"])
-        .arg(&af)
-        .args([
-            "-ac",
-            "2",
-            "-ar",
-            "48000",
-            "-c:a",
-            "pcm_s16le",
-            "-threads",
-            &th,
-        ])
-        .arg(&full_wav);
+    extract_full.args(extract_full_args(input, &full_wav));
 
     let noise_ss = hhmmss(params.noise_start_secs);
     let noise_t = hhmmss(params.noise_len_secs);
@@ -220,23 +258,7 @@ pub fn launch(
         .arg(&noise_prof);
 
     let mut remux = tools::command(Tool::Ffmpeg);
-    remux
-        .args(["-hide_banner", "-nostdin", "-y", "-fflags", "+genpts", "-i"])
-        .arg(input)
-        .args(["-fflags", "+genpts", "-i"])
-        .arg(&norm_wav)
-        .args([
-            "-map",
-            "0:v:0",
-            "-map",
-            "1:a:0",
-            "-c:v",
-            "copy",
-            "-c:a",
-            "pcm_s16le",
-        ])
-        .args(["-avoid_negative_ts", "make_zero", "-shortest"])
-        .arg(output);
+    remux.args(remux_args(input, &norm_wav, output));
 
     // The hum-notch stage is skipped entirely (not just a no-op) when
     // disabled, so noisered runs against `full_wav` directly and no
