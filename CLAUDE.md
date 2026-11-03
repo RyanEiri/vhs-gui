@@ -88,6 +88,12 @@ DISPLAY=:0 ./target/debug/vhs-gui
   toolbar warning. Never hardcode `/usr/bin/<tool>` or call `Command::new("ffmpeg")`; use
   `tools::command(Tool::X)` or `tools::require(Tool::X)?` before spawning. `/usr/bin` precedes
   `PATH` on purpose: `/usr/local/bin/ffmpeg` is the DeckLink build and must not be picked up here.
+- **`src/vs_stack.rs`** — presence check (not import) for the VapourSynth plugins and the havsfunc
+  Python modules the scripts need; feeds the Tools window and toolbar warning. Keep `NEEDS` in step
+  with the `vhs_plugins.load(...)` calls in `assets/vs/*.vpy` and the modules `havsfunc` imports.
+- **`tools/realesrgan-rocm/`** — source of the ROCm upscaler (`driver.py`, `requirements.txt`, the
+  `realesrgan-rocm` shim). Installed by hand into `~/opt/realesrgan-rocm` and `~/bin` per
+  `docs/INSTALL.md`; the app calls the installed shim, not these files.
 - **`src/vs_assets.rs`** + **`assets/vs/`** — the VapourSynth scripts (`qtgmc`, `ivtc`, `ivtc_decombed`,
   `field_align`, `vdecimate` `.vpy` and the `vhs_plugins.py` plugin loader) embedded with
   `include_str!`. `materialize()` writes them to `$XDG_CACHE_HOME/vhs-gui/vs/<content-hash>/` and
