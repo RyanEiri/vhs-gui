@@ -1,6 +1,7 @@
 mod app;
 mod audio_cleanup;
 mod capture;
+mod clock;
 mod config;
 mod denoise;
 mod fix_sync;

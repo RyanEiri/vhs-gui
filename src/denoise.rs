@@ -67,20 +67,6 @@ pub fn steps(input: &Path, output: &Path, work: &Path) -> Vec<Step> {
     ]
 }
 
-/// Local time of day as `HH-MM-SS` (`date +%H-%M-%S`).
-fn local_hms() -> String {
-    // SAFETY: `time` with a null pointer only returns the value; `localtime_r` writes into the
-    // zeroed `tm` we own and returns null on failure, which we check.
-    unsafe {
-        let now = libc::time(std::ptr::null_mut());
-        let mut tm: libc::tm = std::mem::zeroed();
-        if libc::localtime_r(&now, &mut tm).is_null() {
-            return "00-00-00".into();
-        }
-        format!("{:02}-{:02}-{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
-    }
-}
-
 /// `captures/stabilized/<stem>_<hms>_STABLE.mkv`; the stem drops a trailing `.mkv` only.
 pub fn output_path_at(input: &Path, cfg: &Config, hms: &str) -> PathBuf {
     let name = input.file_name().and_then(|s| s.to_str()).unwrap_or("out");
@@ -102,7 +88,7 @@ pub fn launch(input: &Path, cfg: &Config, label: String) -> anyhow::Result<Launc
     if !input.is_file() {
         anyhow::bail!("input not found: {}", input.display());
     }
-    let output = output_path_at(input, cfg, &local_hms());
+    let output = output_path_at(input, cfg, &crate::clock::hms());
     if output.exists() {
         return Ok(Launch::Exists(output));
     }
@@ -222,14 +208,6 @@ mod tests {
             output_path_at(Path::new("/a/noext"), &cfg, "01-02-03"),
             dir.join("noext_01-02-03_STABLE.mkv")
         );
-    }
-
-    #[test]
-    fn local_time_has_the_date_plus_h_m_s_shape() {
-        let t = local_hms();
-        let parts: Vec<u32> = t.split('-').map(|p| p.parse().unwrap()).collect();
-        assert_eq!(t.len(), 8, "{t}");
-        assert!(parts[0] < 24 && parts[1] < 60 && parts[2] < 61, "{t}");
     }
 
     /// Runs the real `vhs_denoise.sh` (which calls `denoise.sh`) with stub ffmpeg and sox that
