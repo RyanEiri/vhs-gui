@@ -13,6 +13,7 @@ mod persist;
 mod pipeline;
 mod settings;
 mod tools;
+mod upscale;
 mod v4l2;
 mod viewer_encode;
 mod vs_assets;
@@ -49,6 +50,14 @@ fn load_icon() -> Option<egui::IconData> {
 }
 
 fn main() -> eframe::Result {
+    // `vhs-gui upscale-worker JOB.toml` runs an upscale job with no GUI at all; it must be decided
+    // before any window or GL setup, and no other argument may change what plain `vhs-gui` does.
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() == Some(upscale::worker::SUBCOMMAND) {
+        let rest: Vec<String> = args.collect();
+        std::process::exit(upscale::worker::main(&rest));
+    }
+
     let icon = load_icon();
 
     let mut viewport = egui::ViewportBuilder::default()
