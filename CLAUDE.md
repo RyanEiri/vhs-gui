@@ -59,7 +59,11 @@ DISPLAY=:0 ./target/debug/vhs-gui
   takes the segment length from the running job's `WORK_DIR/run_config.txt`
   (`SEG_SECONDS`), not the UI slider.
 - **`src/panels/monitor.rs`** + **`src/capture.rs`** — capture state machine (`Idle →
-  Monitoring → Releasing → Capturing`), V4L2 device handoff between mpv and ffmpeg.
+  Monitoring → Releasing → Capturing`). mpv never opens `/dev/video`: `monitor_feed::MonitorFeed` is
+  a small ffmpeg that reads the grabber and sends the preview mpv plays over UDP; Releasing waits
+  until it has exited (mpv's `idle` is not a signal that the device is free). Closing mpv's own V4L2
+  source crashed the GUI (libavdevice buffer-release callback after the device closed; see
+  ROADMAP.md), which is why.
   `CaptureController` spawns ffmpeg directly (formerly `vhs_capture_ffmpeg.sh`) in its own
   process group, with stderr going straight to `logs/<prefix>_<ts>.ffmpeg.log` so a capture and
   its log survive the GUI dying. `CaptureSettings` holds the hardware/codec settings: compiled-in
@@ -109,6 +113,11 @@ DISPLAY=:0 ./target/debug/vhs-gui
   function, `launch` returns `Started(job, output)` or `Exists(path)` (an existing viewer copy is never
   overwritten). The ignored `matches_the_bash_script` test runs the real script with stub ffmpeg/ffprobe
   and compares arguments; rerun it after any change here.
+- **`src/monitor_feed.rs`** — the live monitor's source: `feed_args` (the capture's video input plus
+  its UDP preview encode) and `MonitorFeed` (own process group; `PR_SET_PDEATHSIG` so the kernel
+  terminates it if the GUI dies, unlike a capture; `stop` = SIGINT, `kill` = SIGKILL, reaped by
+  `poll`). Ignored hardware tests check the stream and the monitor-capture-monitor handoff on the
+  real grabber (GUI must be closed).
 - **`src/vs_stack.rs`** — presence check (not import) for the VapourSynth plugins and the havsfunc
   Python modules the scripts need; feeds the Tools window and toolbar warning. Keep `NEEDS` in step
   with the `vhs_plugins.load(...)` calls in `assets/vs/*.vpy` and the modules `havsfunc` imports.

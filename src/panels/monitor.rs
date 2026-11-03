@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use crate::capture::{self, CaptureController, OrphanCapture};
 use crate::config::Config;
+use crate::monitor_feed::MonitorFeed;
 use crate::mpv_view::{MpvView, Source};
 use crate::v4l2::V4l2Controls;
 
@@ -27,6 +28,10 @@ pub struct MonitorPanel {
     /// a banner offering to re-attach or stop them.
     orphans: Vec<OrphanCapture>,
     orphan_scan_due: Instant,
+    /// The ffmpeg process that feeds the live monitor. mpv never opens the grabber itself (see
+    /// `monitor_feed`).
+    pub feed: MonitorFeed,
+    feed_reopen_at: Option<Instant>,
     releasing_at: Option<Instant>,
     /// True once the UDP preview stream has been opened in mpv.
     pub preview_opened: bool,
@@ -50,6 +55,8 @@ impl MonitorPanel {
             state: CaptureState::Idle,
             orphans: capture::find_orphans(),
             orphan_scan_due: Instant::now() + ORPHAN_SCAN_EVERY,
+            feed: MonitorFeed::new(),
+            feed_reopen_at: None,
             releasing_at: None,
             preview_opened: false,
             capture_last_reopen_at: None,
@@ -87,21 +94,22 @@ impl MonitorPanel {
             }
             CaptureState::Idle => {
                 if ui.button("Monitor").clicked() {
-                    let dev = cfg.v4l2_device.clone();
-                    mpv.open(&Source::V4l2(dev));
-                    self.state = CaptureState::Monitoring;
-                    *status = "Monitoring live signal".into();
+                    match self.start_monitor(mpv, cfg) {
+                        Ok(()) => *status = "Monitoring live signal".into(),
+                        Err(e) => *status = format!("Monitor failed to start: {e}"),
+                    }
                 }
                 if ui.button("Start Capture").clicked() {
-                    self.begin_capture(mpv, cfg, status);
+                    self.begin_capture(cfg, status);
                 }
             }
             CaptureState::Monitoring => {
                 ui.label(egui::RichText::new("● MONITOR").color(egui::Color32::GREEN));
                 if ui.button("Start Capture").clicked() {
-                    self.begin_capture(mpv, cfg, status);
+                    self.begin_capture(cfg, status);
                 }
                 if ui.button("Stop Monitor").clicked() {
+                    self.feed.stop();
                     mpv.stop();
                     self.state = CaptureState::Idle;
                     *status = "Idle".into();
@@ -168,6 +176,7 @@ impl MonitorPanel {
         status: &mut String,
     ) -> bool {
         self.capture.poll();
+        self.feed.poll();
 
         // While idle, notice a capture that outlived its GUI (or was started elsewhere).
         if self.state == CaptureState::Idle {
@@ -178,16 +187,39 @@ impl MonitorPanel {
             ctx.request_repaint_after(ORPHAN_SCAN_EVERY);
         }
 
-        // Releasing → Capturing once mpv is idle or 1 s timeout.
+        // Monitoring: the feed ended on its own (device unplugged, ffmpeg error), or mpv has not
+        // received the stream yet and needs another open.
+        if self.state == CaptureState::Monitoring {
+            if !self.feed.is_running() {
+                let why = self.feed.last_log_line().unwrap_or_default();
+                mpv.stop();
+                self.state = CaptureState::Idle;
+                *status = format!("Monitor stopped: {why}");
+            } else {
+                if mpv.state.idle
+                    && self
+                        .feed_reopen_at
+                        .map(|t| t.elapsed() > Duration::from_secs(2))
+                        .unwrap_or(true)
+                {
+                    mpv.open(&Source::Udp(capture::PREVIEW_URL.into()));
+                    self.feed_reopen_at = Some(Instant::now());
+                }
+                ctx.request_repaint_after(Duration::from_secs(1));
+            }
+        }
+
+        // Releasing → Capturing once the monitor feed has actually exited and let go of the
+        // grabber. (mpv's own idle state says nothing about that.)
         if self.state == CaptureState::Releasing {
-            let timed_out = self
-                .releasing_at
-                .map(|t| t.elapsed() > Duration::from_millis(1000))
-                .unwrap_or(true);
-            if mpv.state.idle || timed_out {
+            let waited = self.releasing_at.map(|t| t.elapsed()).unwrap_or_default();
+            if !self.feed.is_running() {
                 self.releasing_at = None;
                 self.do_start_capture(cfg, status);
             } else {
+                if waited > Duration::from_secs(3) {
+                    self.feed.kill();
+                }
                 ctx.request_repaint();
             }
         }
@@ -224,40 +256,60 @@ impl MonitorPanel {
             .map(|d| Instant::now() >= d)
             .unwrap_or(false)
         {
+            // Stop it and let the natural-end branch below resume the monitor once ffmpeg has
+            // actually exited and released the grabber.
             self.capture.stop();
-            self.end_capture_to_monitoring(mpv, cfg);
-            *status = "Capture stopped (timer) — monitoring live signal".into();
-            return true;
+            self.capture_stop_at = None;
+            *status = "Stopping capture (timer)…".into();
         }
 
         // Natural end: ffmpeg exited on its own (hit -t cap, or normal finish).
         if !self.capture.is_running() {
-            self.end_capture_to_monitoring(mpv, cfg);
-            *status = "Capture ended — monitoring live signal".into();
+            *status = match self.end_capture_to_monitoring(mpv, cfg) {
+                Ok(()) => "Capture ended — monitoring live signal".into(),
+                Err(e) => format!("Capture ended — monitor failed to start: {e}"),
+            };
             return true;
         }
 
         false
     }
 
+    /// Start the monitor: the feed ffmpeg reads the grabber and mpv plays its UDP preview.
+    fn start_monitor(&mut self, mpv: &mut MpvView, cfg: &Config) -> anyhow::Result<()> {
+        self.feed.start(cfg)?;
+        mpv.open(&Source::Udp(capture::PREVIEW_URL.into()));
+        self.feed_reopen_at = Some(Instant::now());
+        self.state = CaptureState::Monitoring;
+        Ok(())
+    }
+
     /// Shared cleanup after a timer-driven capture end (natural `-t` safety
     /// cap, or the GUI "Stop after" deadline) — the archival file is done,
     /// but the user likely still wants the live feed rather than a frozen
-    /// last frame, so hand the V4L2 device straight back to Monitoring
+    /// last frame, so hand the grabber straight back to the monitor
     /// instead of dropping to Idle. Manual "Stop Capture" is unaffected —
     /// it still goes to Idle via `do_stop_capture`.
-    fn end_capture_to_monitoring(&mut self, mpv: &mut MpvView, cfg: &Config) {
+    fn end_capture_to_monitoring(&mut self, mpv: &mut MpvView, cfg: &Config) -> anyhow::Result<()> {
         self.preview_opened = false;
         self.capture_last_reopen_at = None;
         self.capture_stop_at = None;
         self.capture_stop_input.clear();
-        mpv.open(&Source::V4l2(cfg.v4l2_device.clone()));
-        self.state = CaptureState::Monitoring;
+        match self.start_monitor(mpv, cfg) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                mpv.stop();
+                self.state = CaptureState::Idle;
+                Err(e)
+            }
+        }
     }
 
-    fn begin_capture(&mut self, mpv: &mut MpvView, cfg: &Config, status: &mut String) {
+    fn begin_capture(&mut self, cfg: &Config, status: &mut String) {
         if self.state == CaptureState::Monitoring {
-            mpv.stop();
+            // Stop the feed and wait (in `poll`) until it has exited and let go of the grabber;
+            // mpv keeps playing the last of the stream and never touches the device.
+            self.feed.stop();
             self.state = CaptureState::Releasing;
             self.releasing_at = Some(Instant::now());
             *status = "Releasing device…".into();

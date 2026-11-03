@@ -68,10 +68,12 @@ Built and run on a single Linux workstation:
   override it for different capture hardware. A fair amount of this app's
   capture-side code exists specifically to work around this device's quirks:
   - **Exclusive access.** Only one process can hold its V4L2 fd at a time, so
-    handing off from the live Monitor preview (mpv) to a capture (ffmpeg)
-    can't just start the second process — mpv's hold has to actually clear
-    first. That's the `Releasing` capture state (1s timeout,
-    `src/panels/monitor.rs`) between Monitoring and Capturing.
+    handing off from the live Monitor to a capture can't just start the second
+    process: the monitor's hold has to actually clear first. The monitor is a
+    small ffmpeg process (`src/monitor_feed.rs`) sending a UDP preview that mpv
+    plays, so the `Releasing` capture state (`src/panels/monitor.rs`) simply
+    waits until that process has exited. (mpv used to open the grabber itself;
+    closing it crashed the GUI inside libmpv/libavdevice, so it no longer does.)
   - **Spurious preview drops.** The live-preview stream sometimes goes idle
     on its own mid-capture even though ffmpeg is still recording correctly
     in the background. Rather than surface that as an error, an "insurance
@@ -129,8 +131,9 @@ sudo install -m 0755 target/release/vhs-gui /usr/local/bin/vhs-gui
 
 ## What It Does
 
-- **Monitor** — opens the V4L2 capture device directly in mpv for a live signal
-  check before recording. The device is released cleanly once capture starts.
+- **Monitor** — a live signal check before recording: a small ffmpeg process reads the V4L2
+  capture device and sends a low-latency preview that mpv plays over UDP. The feed is stopped and
+  has exited before a capture starts, and it is terminated by the kernel if the GUI dies.
 - **Start/Stop Capture** — spawns the capture process; the archival file opens in
   the embedded player as soon as it appears on disk, with a rolling near-live
   preview window. Ctrl+C/SIGINT during capture is a normal stop, not a failure.
@@ -155,9 +158,9 @@ sudo install -m 0755 target/release/vhs-gui /usr/local/bin/vhs-gui
 - **Delete** — moves files to the FreeDesktop.org trash, recoverable from any file
   manager.
 
-**Capture state machine:** `Idle → Monitoring → Releasing (1s timeout) → Capturing`.
-The V4L2 device is exclusive to ffmpeg during capture; mpv returns to idle during
-Releasing then switches to the growing archival file once capture begins.
+**Capture state machine:** `Idle → Monitoring → Releasing → Capturing`. The V4L2 device is
+exclusive to one ffmpeg at a time: Releasing waits for the monitor feed to exit, then the capture
+starts and mpv plays the capture's own UDP preview.
 
 ## Native-Rust port status
 
