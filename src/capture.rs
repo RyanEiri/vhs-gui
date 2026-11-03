@@ -1158,6 +1158,69 @@ mod tests {
         );
     }
 
+    /// The sequence that used to crash the GUI, with the real ffmpeg and the real grabber but no mpv:
+    /// monitor feed, then a capture (the feed must be fully gone first), then the monitor again.
+    /// Writes a 3 s capture under a temp directory. Needs the USB grabber and UDP port 23000 free (the
+    /// GUI must not be running); not run by default.
+    #[test]
+    #[ignore]
+    fn monitor_to_capture_to_monitor_on_the_real_grabber() {
+        use crate::monitor_feed::MonitorFeed;
+
+        let dir = TempDir::new("capture-handoff");
+        let base = cfg();
+        let mut settings = CaptureSettings::load(&base);
+        settings.outdir = dir.0.join("archival");
+        let logs = dir.0.join("logs");
+
+        let mut feed = MonitorFeed::new();
+        feed.start(&base).unwrap();
+        thread::sleep(Duration::from_millis(1500));
+        assert!(feed.poll(), "the feed died: {:?}", feed.last_log_line());
+
+        // Start Capture: stop the feed and wait until it has really exited.
+        feed.stop();
+        assert!(wait_until(|| !feed.poll()), "the feed did not exit");
+
+        let ffmpeg = tools::require(Tool::Ffmpeg).unwrap();
+        let mut c = CaptureController::new();
+        c.start_with(&ffmpeg, &settings, &logs, "00:00:03").unwrap();
+        let mut waited = 0;
+        while c.is_running() && waited < 300 {
+            c.poll();
+            thread::sleep(Duration::from_millis(100));
+            waited += 1;
+        }
+        assert!(!c.is_running(), "the 3 s capture did not end by itself");
+        let out = c.output_path.clone().expect("no output file was created");
+        assert!(
+            out.metadata().unwrap().len() > 100_000,
+            "the capture is empty"
+        );
+        let probe = tools::command(Tool::Ffprobe)
+            .args(["-v", "error", "-show_entries", "format=duration"])
+            .args(["-of", "csv=p=0"])
+            .arg(&out)
+            .output()
+            .unwrap();
+        let secs: f64 = String::from_utf8_lossy(&probe.stdout)
+            .trim()
+            .parse()
+            .unwrap();
+        assert!((2.5..4.0).contains(&secs), "capture length {secs} s");
+
+        // The capture ended on its own; the monitor resumes.
+        feed.start(&base).unwrap();
+        thread::sleep(Duration::from_millis(1500));
+        assert!(
+            feed.poll(),
+            "the feed did not resume: {:?}",
+            feed.last_log_line()
+        );
+        feed.stop();
+        assert!(wait_until(|| !feed.poll()));
+    }
+
     /// `text` with each listed `KEY=...` line replaced by `KEY="value"`.
     fn neutralize_env(text: &str, replace: &[(&str, &str)]) -> String {
         text.lines()

@@ -530,6 +530,8 @@ impl eframe::App for App {
         if self.monitor.capture.is_running() {
             self.monitor.capture.stop();
         }
+        // The monitor feed holds the grabber and records nothing: it must not outlive the GUI.
+        self.monitor.feed.kill();
     }
 }
 
