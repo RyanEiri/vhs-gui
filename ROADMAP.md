@@ -198,17 +198,26 @@ release, one PR takes it into `main`. Merge `main` into it when `main` moves (bu
 
 ## Phase 5: upscale (largest, riskiest)
 
-- [ ] One native engine for all three variants (variant = model, plus `hue=s=0` for B&W): segment
-      loop, frame extract, Real-ESRGAN (ROCm `BATCH_SIZE=2` or ncnn), downscale, H.264 encode, concat,
-      config fingerprint (`ALLOW_MIXED`), resumable `seg_*.mp4`, `run_config.txt`.
-- [ ] Rust writes the lock (`upscale.pgid`) itself. `check_lock` accepts a vhs-gui worker as owner
-      and keeps accepting old `vhs_upscale*.sh` jobs for one release. Update the CLAUDE.md rule that
-      Rust only reads PGID files.
-- [ ] Decide whether the engine runs as a detached `vhs-gui --upscale-worker` so a job still
-      outlives the GUI. Tests: fingerprint, resume after kill, stop after segment.
-- [ ] Keep the bash path selectable until one real tape upscale has matched.
-- [ ] Remove the three `upscale*_script()` accessors, `scripts_dir`, the "Scripts dir" field, and the
-      "Transitional bash dependency" section of CLAUDE.md.
+Design and the decisions it needs from Ryan: [`docs/upscale-engine-design.md`](docs/upscale-engine-design.md).
+In short: a detached `vhs-gui upscale-worker` process (so a job still outlives the GUI), a faithful
+port of the three scripts (they differ only in model, pre-filter, drift tolerance and a GUI-unreachable
+decomb option) with the bash scripts kept selectable until a real upscale matches.
+
+- [ ] **5a** `src/upscale/` engine core and worker for the standard variant: segment loop, frame and
+      segment verification, validation with one auto-repair pass, concat, audio mux, sync fix,
+      `run_config.txt` byte for byte, `upscale.pgid` written by the worker, `.part` rename so a killed
+      encode cannot poison a resume. Settings toggle "Upscale engine" (default: script). Golden tests
+      against a patched copy of the real script with stub tools; a GPU equivalence test.
+- [ ] **5b** anime and B&W variants; all six upscale buttons wired.
+- [ ] **5c** `check_lock`/`is_upscale_group_leader` accept the worker as well as `vhs_upscale*.sh` for one
+      release; stale work-dir handling; resume, cancel, pause, stop-after-segment and reattach tests.
+      Update the CLAUDE.md rule that Rust only reads PGID files.
+- [ ] **5d** After a real upscale matches: default to the native engine; remove the three
+      `upscale*_script()` accessors, `scripts_dir`, the "Scripts dir" field, `PipelineJob::start` and its
+      bash call site, and the "Transitional bash dependency" section of CLAUDE.md.
+- [ ] Dead settings found while reading: drop `settings.denoise` (exports `DENOISE=1`, which no script
+      reads, and nothing in the UI sets it). `DECOMB` (anime) is unreachable from the GUI and is not
+      ported; it can return as an option later.
 
 ## Phase 6a: two packages, Ubuntu 24.04 (R55) and 26.04 (R81)
 
