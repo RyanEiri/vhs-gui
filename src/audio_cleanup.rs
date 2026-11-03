@@ -10,16 +10,14 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
 use crate::config::Config;
 use crate::pipeline::{PipelineJob, SeqCtx, SeqStep};
-
-const FFMPEG: &str = "/usr/bin/ffmpeg";
-const SOX: &str = "/usr/bin/sox";
+use crate::tools::{self, Tool};
 
 const HUM_HZ: u32 = 60;
 
@@ -152,12 +150,8 @@ pub fn launch(
     label: String,
     params: &Params,
 ) -> anyhow::Result<PipelineJob> {
-    if !Path::new(FFMPEG).is_file() {
-        anyhow::bail!("ffmpeg not found: {FFMPEG}");
-    }
-    if !Path::new(SOX).is_file() {
-        anyhow::bail!("sox not found: {SOX}. Install with: sudo apt-get install sox");
-    }
+    tools::require(Tool::Ffmpeg)?;
+    tools::require(Tool::Sox)?;
     if !input.is_file() {
         anyhow::bail!("input not found: {}", input.display());
     }
@@ -178,7 +172,7 @@ pub fn launch(
     let af = af_chain();
     let th = threads();
 
-    let mut extract_full = Command::new(FFMPEG);
+    let mut extract_full = tools::command(Tool::Ffmpeg);
     extract_full
         .args(["-hide_banner", "-nostdin", "-y", "-fflags", "+genpts", "-i"])
         .arg(input)
@@ -200,7 +194,7 @@ pub fn launch(
     let noise_t = hhmmss(params.noise_len_secs);
     let nr_amount = params.nr_amount.to_string();
 
-    let mut extract_sample = Command::new(FFMPEG);
+    let mut extract_sample = tools::command(Tool::Ffmpeg);
     extract_sample
         .args(["-hide_banner", "-nostdin", "-y", "-fflags", "+genpts"])
         .args(["-ss", &noise_ss, "-t", &noise_t, "-i"])
@@ -219,13 +213,13 @@ pub fn launch(
         ])
         .arg(&sample_wav);
 
-    let mut noiseprof = Command::new(SOX);
+    let mut noiseprof = tools::command(Tool::Sox);
     noiseprof
         .arg(&sample_wav)
         .args(["-n", "noiseprof"])
         .arg(&noise_prof);
 
-    let mut remux = Command::new(FFMPEG);
+    let mut remux = tools::command(Tool::Ffmpeg);
     remux
         .args(["-hide_banner", "-nostdin", "-y", "-fflags", "+genpts", "-i"])
         .arg(input)
@@ -250,7 +244,7 @@ pub fn launch(
     let mut steps: Vec<(&'static str, SeqStep)> =
         vec![("Extracting audio...", SeqStep::Cmd(extract_full))];
     let noisered_input = if params.hum_enable {
-        let mut hum_notch = Command::new(SOX);
+        let mut hum_notch = tools::command(Tool::Sox);
         hum_notch.arg(&full_wav).arg(&hum_wav).args([
             "bandreject",
             &HUM_HZ.to_string(),
@@ -268,7 +262,7 @@ pub fn launch(
         full_wav.clone()
     };
 
-    let mut noisered = Command::new(SOX);
+    let mut noisered = tools::command(Tool::Sox);
     noisered
         .arg(&noisered_input)
         .arg(&clean_wav)
@@ -311,7 +305,7 @@ fn loudnorm_step(
     Box::new(move |ctx: &SeqCtx| {
         let target_i = target_i.to_string();
 
-        let mut measure = Command::new(FFMPEG);
+        let mut measure = tools::command(Tool::Ffmpeg);
         measure
             .args(["-hide_banner", "-nostdin", "-i"])
             .arg(&input)
@@ -334,7 +328,7 @@ fn loudnorm_step(
             return false;
         };
 
-        let mut apply = Command::new(FFMPEG);
+        let mut apply = tools::command(Tool::Ffmpeg);
         apply
             .args(["-hide_banner", "-nostdin", "-y", "-i"])
             .arg(&input)
@@ -429,14 +423,12 @@ impl QuietSpotScan {
 }
 
 fn run_scan(input: &Path, shared: &QuietSpotShared) -> Result<Option<QuietSpot>, String> {
-    if !Path::new(FFMPEG).is_file() {
-        return Err(format!("ffmpeg not found: {FFMPEG}"));
-    }
+    tools::require(Tool::Ffmpeg).map_err(|e| e.to_string())?;
     if !input.is_file() {
         return Err(format!("input not found: {}", input.display()));
     }
 
-    let mut cmd = Command::new(FFMPEG);
+    let mut cmd = tools::command(Tool::Ffmpeg);
     cmd.args(["-hide_banner", "-nostdin", "-i"])
         .arg(input)
         .args(["-vn", "-af"])
@@ -519,7 +511,7 @@ fn pick_quiet_window(gap_start: f64, gap_end: f64) -> (f64, f64) {
 }
 
 fn measure_rms(input: &Path, start_secs: f64, len_secs: f64) -> Option<f64> {
-    let out = Command::new(FFMPEG)
+    let out = tools::command(Tool::Ffmpeg)
         .args(["-hide_banner", "-nostdin", "-loglevel", "info"])
         .args(["-ss", &hhmmss(start_secs), "-t", &hhmmss(len_secs), "-i"])
         .arg(input)
@@ -714,7 +706,7 @@ mod tests {
         // the tone, so the tone survives cleanup as it would on a real tape.
         let lead = dir.join("lead.wav");
         assert!(
-            Command::new(FFMPEG)
+            tools::command(Tool::Ffmpeg)
                 .args(["-hide_banner", "-nostdin", "-y", "-loglevel", "error"])
                 .args(["-f", "lavfi", "-i", "anoisesrc=duration=1:amplitude=0.02"])
                 .args(["-c:a", "pcm_s16le"])
@@ -726,7 +718,7 @@ mod tests {
 
         let prog = dir.join("prog.wav");
         assert!(
-            Command::new(FFMPEG)
+            tools::command(Tool::Ffmpeg)
                 .args(["-hide_banner", "-nostdin", "-y", "-loglevel", "error"])
                 .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=2"])
                 .args(["-f", "lavfi", "-i", "sine=frequency=60:duration=2"])
@@ -744,7 +736,7 @@ mod tests {
 
         let audio = dir.join("audio.wav");
         assert!(
-            Command::new(FFMPEG)
+            tools::command(Tool::Ffmpeg)
                 .args(["-hide_banner", "-nostdin", "-y", "-loglevel", "error", "-i"])
                 .arg(&lead)
                 .arg("-i")
@@ -759,7 +751,7 @@ mod tests {
 
         let noisy = dir.join("noisy.mkv");
         assert!(
-            Command::new(FFMPEG)
+            tools::command(Tool::Ffmpeg)
                 .args(["-hide_banner", "-nostdin", "-y", "-loglevel", "error"])
                 .args(["-f", "lavfi", "-i", "color=c=black:s=64x64:d=3", "-i"])
                 .arg(&audio)
@@ -813,7 +805,7 @@ mod tests {
         // it by >12dB -- so an 8dB bar cleanly discriminates "the notch
         // stage genuinely ran" from noisered's incidental effect.
         let db_level = |path: &Path, af: &str| -> f64 {
-            let out = Command::new(FFMPEG)
+            let out = tools::command(Tool::Ffmpeg)
                 .args(["-hide_banner", "-nostdin", "-loglevel", "info"])
                 .args(["-ss", "1", "-t", "2", "-i"])
                 .arg(path)
@@ -852,7 +844,7 @@ mod tests {
 
         // 2s tone, 6s silence, 2s tone -- the silent gap is unambiguous.
         let input = dir.join("gapped.mkv");
-        let status = Command::new(FFMPEG)
+        let status = tools::command(Tool::Ffmpeg)
             .args(["-hide_banner", "-nostdin", "-y", "-loglevel", "error"])
             .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=2"])
             .args(["-f", "lavfi", "-i", "anullsrc=duration=6"])

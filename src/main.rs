@@ -9,6 +9,7 @@ mod panels;
 mod persist;
 mod pipeline;
 mod settings;
+mod tools;
 mod v4l2;
 mod vs_ops;
 
@@ -26,7 +27,9 @@ fn load_icon() -> Option<egui::IconData> {
     let rgba: Vec<u8> = match info.color_type {
         png::ColorType::Rgba => bytes.to_vec(),
         png::ColorType::Rgb => bytes
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[1], p[2], 255])
             .collect(),
         _ => return None,
