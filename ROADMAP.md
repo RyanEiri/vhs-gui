@@ -114,7 +114,10 @@ release, one PR takes it into `main`. Merge `main` into it when `main` moves (bu
       unreachable from the GUI).
 - [x] Found on the way and fixed separately: `prepare_spawn` never created the log directory, so every
       job failed with a bare "No such file or directory" on a machine without `~/Videos/logs`.
-- [ ] Try the Viewer Encode button on a real Edit Master file in the GUI (not yet done).
+- [x] Tried the Viewer Encode button in the GUI on a real Edit Master file (2026-11-03, debug build):
+      SD preset as designed (H.264 Main@4.0, 640x480, yuv420p, 29.97 fps; AAC-LC 48 kHz stereo; same
+      duration as the source), plays fine, and a second click left the existing copy alone. Not
+      tried: the HD preset on a real source (covered by the argument-matching test only).
 
 ## Phase 3: Denoise and Denoise+QTGMC
 
