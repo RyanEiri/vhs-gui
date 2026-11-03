@@ -91,12 +91,6 @@ impl Config {
     pub fn log_dir(&self) -> PathBuf {
         self.videos_dir.join("logs")
     }
-    pub fn capture_pgid_file(&self) -> PathBuf {
-        self.log_dir().join("capture.pgid")
-    }
-    pub fn capture_script(&self) -> PathBuf {
-        self.scripts_dir.join("vhs_capture_ffmpeg.sh")
-    }
     // TODO(native-port): remove once Upscale is natively ported.
     pub fn upscale_script(&self) -> PathBuf {
         self.scripts_dir.join("vhs_upscale.sh")

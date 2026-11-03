@@ -55,8 +55,8 @@ impl Default for PersistedUpscaleSettings {
 // -----------------------------------------------------------------------
 // PersistedPaths — user overrides for working directories, GUI-editable.
 // A blank/absent value means "use the env var / hardcoded default" — see
-// Config::from_paths. videos_dir is intentionally not included here: several
-// vhs-cli scripts (vhs_capture_ffmpeg.sh in particular) hardcode
+// Config::from_paths. videos_dir is intentionally not included here: the vhs-cli
+// scripts that remain (the upscale scripts) hardcode
 // $HOME/Videos internally with no env override, so making it GUI-editable
 // on the Rust side alone would silently desync the GUI's library view from
 // where captures actually land.

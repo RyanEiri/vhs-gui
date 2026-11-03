@@ -149,10 +149,26 @@ release, one PR takes it into `main`. Merge `main` into it when `main` moves (bu
 
 ## Phase 4: capture
 
-- [ ] Compile the `capture.env` defaults into a Rust struct (file stays an optional override).
-- [ ] Spawn ffmpeg directly and hold the `Child`; keep the re-armable Cap timer, the 6 h `-t`
-      backstop, `seg###.mkv` naming and Ctrl+C as a normal stop.
-- [ ] Remove `capture_script()`. Test with a v4l2 loopback or a short real capture.
+- [x] `CaptureSettings` in `src/capture.rs`: the shipped archival `capture.env` compiled in as
+      defaults (a test checks they match the file exactly), with `~/Videos/ffmpeg-current/capture.env`
+      applied over them when present, so slot switching with `vhs_mode.sh` keeps working and a fresh
+      install needs no file. The old `VHS_FFMPEG_BIN`/`VHS_FFPROBE_BIN` keys are ignored (the tool
+      resolver replaced them).
+- [x] ffmpeg is spawned directly and the `Child` held: own process group, stderr straight into
+      `logs/<prefix>_<timestamp>.ffmpeg.log` (as `tee` did), 6 h `-t` backstop and the re-armable
+      Cap timer kept. The pgid file is gone; the timer signals only the live process group
+      (`signal_if_live`, unit tested). Output names are the script's `<prefix>_<timestamp>.mkv`.
+- [x] Progress now reads the last 8 KiB of the log and splits on `\r` (ffmpeg's separator) as well as
+      `\n`; the old code read the whole log on every poll and split on `\n` only.
+- [x] Golden test: the real `vhs_capture_ffmpeg.sh` run with stub ffmpeg and a temp `HOME` against
+      both shipped slots (archival FFV1, viewer libx264) produces identical ffmpeg arguments. The
+      controller is tested against a stub ffmpeg that handles SIGINT (start, progress, stop, timer
+      fires, cancelled and re-armed timers, natural exit); those tests were flaky (about 1 run in 4)
+      from a "Text file busy" race between parallel tests and now retry that one error.
+- [x] `capture_script()` and `capture_pgid_file()` removed. Not ported: the script's closing
+      `ffprobe` listing and its "is ffmpeg still running" cleanup (the child is held directly).
+- [ ] Run a real capture in the GUI with the USB grabber and a tape or live signal: start, preview in
+      the monitor panel, Stop after, natural end at the cap, and a Cancel. Not done yet.
 
 ## Phase 5: upscale (largest, riskiest)
 

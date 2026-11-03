@@ -271,7 +271,7 @@ impl App {
     }
 
     /// Videos directory (data root) is deliberately not editable here:
-    /// several vhs-cli scripts (vhs_capture_ffmpeg.sh in particular) hardcode
+    /// the vhs-cli scripts that remain (the upscale scripts) hardcode
     /// $HOME/Videos internally with no env override, so making it
     /// GUI-editable on the Rust side alone would desync the library view
     /// from where captures actually land. Scripts dir and work root are

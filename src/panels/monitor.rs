@@ -38,7 +38,7 @@ pub struct MonitorPanel {
 impl MonitorPanel {
     pub fn new(cfg: &Config) -> Self {
         Self {
-            capture: CaptureController::new(cfg.capture_pgid_file(), cfg.archival_dir()),
+            capture: CaptureController::new(),
             state: CaptureState::Idle,
             releasing_at: None,
             preview_opened: false,
@@ -178,7 +178,7 @@ impl MonitorPanel {
 
         // Open the UDP preview once ffmpeg confirms it's running.
         if !self.preview_opened && self.capture.is_running() {
-            mpv.open(&Source::Udp("udp://127.0.0.1:23000?pkt_size=1316".into()));
+            mpv.open(&Source::Udp(crate::capture::PREVIEW_URL.into()));
             self.preview_opened = true;
             self.capture_last_reopen_at = Some(Instant::now());
             *status = "Capturing… (previewing)".into();
@@ -191,7 +191,7 @@ impl MonitorPanel {
                 .map(|t| t.elapsed() > Duration::from_secs(2))
                 .unwrap_or(true);
             if can_reopen {
-                mpv.open(&Source::Udp("udp://127.0.0.1:23000?pkt_size=1316".into()));
+                mpv.open(&Source::Udp(crate::capture::PREVIEW_URL.into()));
                 self.capture_last_reopen_at = Some(Instant::now());
             }
         }
@@ -258,10 +258,10 @@ impl MonitorPanel {
 
     fn do_start_capture(&mut self, cfg: &Config, status: &mut String) {
         self.capture.cancel_stop_timer();
-        match self.capture.start(
-            &cfg.capture_script(),
-            crate::capture::FFMPEG_HARD_SAFETY_CAP,
-        ) {
+        match self
+            .capture
+            .start(cfg, crate::capture::FFMPEG_HARD_SAFETY_CAP)
+        {
             Ok(()) => {
                 self.state = CaptureState::Capturing;
                 self.preview_opened = false;
