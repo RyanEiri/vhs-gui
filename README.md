@@ -166,7 +166,8 @@ phase, toward being fully self-contained. Each phase replaces a handful of
 bash-backed buttons with native Rust that spawns the underlying tools (ffmpeg,
 `vspipe`, Real-ESRGAN) directly — never a wrapper script. `src/config.rs` marks each
 remaining bash-backed operation with a `// TODO(native-port)` comment so the
-remaining surface area is always visible in the source.
+remaining surface area is always visible in the source. The phase plan and to-do list
+for becoming fully self-contained and portable is in [`ROADMAP.md`](ROADMAP.md).
 
 ## System dependency notes
 
