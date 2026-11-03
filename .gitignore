@@ -1,3 +1,4 @@
 target/
 *.deb
 .claude/settings.local.json
+__pycache__/
