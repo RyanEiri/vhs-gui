@@ -12,6 +12,7 @@ use std::process::Command;
 use crate::config::Config;
 use crate::pipeline::PipelineJob;
 use crate::tools::{self, Tool};
+use crate::vs_assets;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VsOp {
@@ -87,6 +88,8 @@ pub fn output_path(op: VsOp, input: &Path) -> PathBuf {
 
 /// Everything resolved during preflight, ready for the command builders.
 struct Resolved {
+    /// Directory the embedded scripts were written to; also put on `PYTHONPATH`.
+    script_dir: PathBuf,
     vspipe: PathBuf,
     ffmpeg: PathBuf,
     output: PathBuf,
@@ -96,15 +99,13 @@ struct Resolved {
 /// Validates inputs/tools exist and are runnable before anything is spawned —
 /// mirrors the bash scripts' `[[ -f ]]`/`[[ -x ]]` checks with the same error
 /// text, but fails fast with no half-started pipe.
-fn preflight(op: VsOp, input: &Path, cfg: &Config) -> anyhow::Result<Resolved> {
+fn preflight(op: VsOp, input: &Path) -> anyhow::Result<Resolved> {
     if !input.is_file() {
         anyhow::bail!("input not found: {}", input.display());
     }
 
-    let vpy = cfg.tools_dir().join(op.vpy_filename());
-    if !vpy.is_file() {
-        anyhow::bail!("{} not found: {}", op.vpy_filename(), vpy.display());
-    }
+    let script_dir = vs_assets::materialize()
+        .map_err(|e| anyhow::anyhow!("could not write the embedded VapourSynth scripts: {e}"))?;
 
     let vspipe = tools::require(Tool::Vspipe)?;
     let ffmpeg = tools::require(Tool::Ffmpeg)?;
@@ -116,6 +117,7 @@ fn preflight(op: VsOp, input: &Path, cfg: &Config) -> anyhow::Result<Resolved> {
     };
 
     Ok(Resolved {
+        script_dir,
         vspipe,
         ffmpeg,
         output: output_path(op, input),
@@ -145,15 +147,13 @@ fn probe_has_audio(input: &Path) -> bool {
     }
 }
 
-fn vpy_path(cfg: &Config, op: VsOp) -> PathBuf {
-    cfg.tools_dir().join(op.vpy_filename())
-}
-
 /// Build the `vspipe` producer Command (env + args). Stdio/process-group are
 /// wired by `PipelineJob::start_native_pipe`.
-fn build_vspipe(op: VsOp, cfg: &Config, input: &Path, r: &Resolved) -> Command {
+fn build_vspipe(op: VsOp, input: &Path, r: &Resolved) -> Command {
     let mut cmd = Command::new(&r.vspipe);
-    cmd.args(["-c", "y4m"]).arg(vpy_path(cfg, op)).arg("-");
+    cmd.args(["-c", "y4m"])
+        .arg(r.script_dir.join(op.vpy_filename()))
+        .arg("-");
     cmd.env("VS_INPUT", input);
     for (k, v) in op.vs_env_defaults() {
         cmd.env(k, v);
@@ -161,10 +161,12 @@ fn build_vspipe(op: VsOp, cfg: &Config, input: &Path, r: &Resolved) -> Command {
     let home = std::env::var("HOME").unwrap_or_default();
     let vsrepo_py = format!("{home}/.local/share/vsrepo/py");
     let existing = std::env::var("PYTHONPATH").unwrap_or_default();
+    // Embedded scripts first (vhs_plugins), then vsrepo's havsfunc stack, then the user's own.
+    let script_dir = r.script_dir.display();
     let pythonpath = if existing.is_empty() {
-        vsrepo_py
+        format!("{script_dir}:{vsrepo_py}")
     } else {
-        format!("{vsrepo_py}:{existing}")
+        format!("{script_dir}:{vsrepo_py}:{existing}")
     };
     cmd.env("PYTHONPATH", pythonpath);
     cmd
@@ -212,8 +214,8 @@ fn build_ffmpeg(input: &Path, r: &Resolved) -> Command {
 
 /// Preflight, build both commands, and spawn the native pipe job.
 pub fn launch(op: VsOp, input: &Path, cfg: &Config, label: String) -> anyhow::Result<PipelineJob> {
-    let resolved = preflight(op, input, cfg)?;
-    let producer = build_vspipe(op, cfg, input, &resolved);
+    let resolved = preflight(op, input)?;
+    let producer = build_vspipe(op, input, &resolved);
     let consumer = build_ffmpeg(input, &resolved);
     PipelineJob::start_native_pipe(label, input, producer, consumer, &cfg.log_dir())
 }
@@ -221,6 +223,54 @@ pub fn launch(op: VsOp, input: &Path, cfg: &Config, label: String) -> anyhow::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ALL_OPS: [VsOp; 5] = [
+        VsOp::Qtgmc,
+        VsOp::Ivtc,
+        VsOp::IvtcDecombed,
+        VsOp::FieldAlign,
+        VsOp::Vdecimate,
+    ];
+
+    #[test]
+    fn every_op_has_an_embedded_script() {
+        for op in ALL_OPS {
+            assert!(
+                vs_assets::FILES
+                    .iter()
+                    .any(|(name, _)| *name == op.vpy_filename()),
+                "{} is not embedded",
+                op.vpy_filename()
+            );
+        }
+    }
+
+    #[test]
+    fn vspipe_gets_the_embedded_script_and_a_pythonpath_that_finds_it() {
+        let script_dir = PathBuf::from("/cache/vhs-gui/vs/abc");
+        let r = Resolved {
+            script_dir: script_dir.clone(),
+            vspipe: PathBuf::from("/usr/bin/vspipe"),
+            ffmpeg: PathBuf::from("/usr/bin/ffmpeg"),
+            output: PathBuf::from("/out.mkv"),
+            has_audio: true,
+        };
+        let cmd = build_vspipe(VsOp::Ivtc, Path::new("/in.mkv"), &r);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args[2], script_dir.join("ivtc.vpy").as_os_str());
+        let pythonpath = cmd
+            .get_envs()
+            .find(|(k, _)| *k == "PYTHONPATH")
+            .and_then(|(_, v)| v)
+            .expect("PYTHONPATH set")
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            pythonpath.starts_with("/cache/vhs-gui/vs/abc:"),
+            "embedded dir must come first: {pythonpath}"
+        );
+        assert!(pythonpath.contains(".local/share/vsrepo/py"));
+    }
 
     #[test]
     fn output_path_suffixes() {
