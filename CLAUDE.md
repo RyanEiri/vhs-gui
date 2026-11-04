@@ -108,8 +108,8 @@ DISPLAY=:0 ./target/debug/vhs-gui
   `extract_full_args`/`remux_args` with `audio_cleanup.rs`. Denoise+QTGMC is this job with QTGMC chained
   after it by `UpscalePanel::chain_after` (see `chained_next`). The ignored `matches_the_bash_script`
   test compares against the real script with stub tools; rerun it after changes.
-- **`src/upscale/`** — the native upscale engine (Script/Native setting, default Script; native only for
-  the plain Upscale buttons so far). `plan.rs` is pure: segment math, output size, filter chains, the
+- **`src/upscale/`** — the native upscale engine (Script/Native setting, default Script; native for all
+  three variants). `plan.rs` is pure: segment math, output size, filter chains, the
   `run_config.txt` fingerprint (byte for byte as the scripts write it) and every command's arguments.
   `engine.rs` runs them (`Binaries` are injected so tests use stubs); a segment is encoded into
   `seg_part/` and renamed into `segments/` only after its frame count checks out. `worker.rs` is

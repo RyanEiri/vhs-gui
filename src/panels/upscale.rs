@@ -343,8 +343,8 @@ impl UpscalePanel {
                         "Native (beta)",
                     )
                     .on_hover_text(
-                        "The built-in engine, run as a detached worker. For now only the plain \
-                             Upscale buttons use it; Anime and B&W still run the script.",
+                        "The built-in engine, run as a detached worker. Every Upscale button \
+                             (plain, Anime, B&W) uses it.",
                     );
                     if self.settings.engine != prev {
                         changed = true;
@@ -867,8 +867,8 @@ impl UpscalePanel {
 
         Self::clear_stale_work_dir(&input, cfg, self.settings.selected_model());
 
-        // The native engine, run as a detached worker, for the variants it covers so far.
-        if self.settings.engine == UpscaleEngine::Native && variant == Variant::Standard {
+        // The native engine, run as a detached worker, for every variant.
+        if self.settings.engine == UpscaleEngine::Native {
             let spec =
                 self.settings
                     .to_job_spec(variant, &input, &output, &cfg.upscale_work_root());
