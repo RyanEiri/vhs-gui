@@ -208,7 +208,7 @@ decomb option) with the bash scripts kept selectable until a real upscale matche
       `run_config.txt` byte for byte, `upscale.pgid` written by the worker, `.part` rename so a killed
       encode cannot poison a resume. Settings toggle "Upscale engine" (default: script). Golden tests
       against a patched copy of the real script with stub tools; a GPU equivalence test.
-- [ ] **5b** anime and B&W variants; all six upscale buttons wired.
+- [x] **5b** anime and B&W variants; all six upscale buttons wired (golden tests pass; GPU clip check for these two still to do).
 - [ ] **5c** `check_lock`/`is_upscale_group_leader` accept the worker as well as `vhs_upscale*.sh` for one
       release; stale work-dir handling; resume, cancel, pause, stop-after-segment and reattach tests.
       Update the CLAUDE.md rule that Rust only reads PGID files.

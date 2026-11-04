@@ -139,7 +139,10 @@ The GUI passes `CRUSH`, `BRIGHTNESS`, `UPSCALE_BACKEND`, `INTERNAL_SCALE`, `FINA
 
 **5a done (2026-11-03):** `src/upscale/{plan,engine,worker}.rs`, the `upscale-worker` mode in `main`,
 the Script/Native engine setting (default Script), and native launch for the plain Upscale buttons.
-Anime and B&W are written in `plan.rs` but not yet wired or tested against their scripts (5b).
+**5b done (2026-11-03):** Anime and B&W are wired to the native engine. The golden tests
+`the_anime_engine_matches_vhs_upscale_anime_sh` and `the_bw_engine_matches_vhs_upscale_bw_sh` compare
+calls and `run_config.txt` with the real scripts (a mutation of the B&W filter makes the test fail).
+Not yet run on the GPU: a real-clip equivalence for these two variants.
 
 Evidence:
 - 38 unit tests on the pure planning code and the engine against stub tools (full run, resume, the
