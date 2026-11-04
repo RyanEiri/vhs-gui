@@ -199,12 +199,10 @@ impl SeqCtx {
     }
 }
 
-/// `vhs_upscale.sh` already writes its own pgid here at startup and removes it
-/// via `trap ... EXIT` — reuse that instead of a second, Rust-only lock file.
-/// Used to detect a job still running from a previous vhs-gui process (see
-/// module-level doc on `on_exit` for why a job can now outlive the GUI that
-/// started it) — works regardless of which vhs-gui binary (or none at all)
-/// launched it, since the script writes this unconditionally.
+/// Both engines write their own pgid here at startup and remove it at exit: `vhs_upscale*.sh` via
+/// `trap ... EXIT`, the native worker via a guard. Used to detect a job still running from a
+/// previous vhs-gui process (see module-level doc on `on_exit` for why a job can outlive the GUI
+/// that started it), whichever engine launched it.
 fn lock_path(work_dir: &Path) -> PathBuf {
     work_dir.join("upscale.pgid")
 }
@@ -216,7 +214,7 @@ fn pid_alive(pid: Pid) -> bool {
 }
 
 /// True if `pid` is a live process-group leader running a `vhs_upscale*.sh`
-/// script. A bare `kill(pid, 0)` can't tell a still-running upscale from an
+/// script or the native `vhs-gui upscale-worker`. A bare `kill(pid, 0)` can't tell a still-running upscale from an
 /// unrelated process that was handed the same pid after the script died
 /// without its EXIT trap removing the lock (SIGKILL, OOM, power loss).
 fn is_upscale_group_leader(pid: Pid) -> bool {
@@ -1085,6 +1083,46 @@ mod reattach_tests {
         reap(child);
     }
 
+    /// The native worker is `vhs-gui upscale-worker JOB.toml`; here `bash -c` with `$0` set to the
+    /// subcommand gives a group leader whose command line contains exactly that argument.
+    fn spawn_fake_worker(dir: &Path, leader: bool) -> Child {
+        use std::os::unix::process::CommandExt as _;
+        let mut cmd = Command::new("bash");
+        cmd.args(["-c", "touch ready; sleep 5; :", "upscale-worker"])
+            .current_dir(dir);
+        if leader {
+            cmd.process_group(0);
+        }
+        let child = cmd.spawn().unwrap();
+        for _ in 0..500 {
+            if dir.join("ready").exists() {
+                return child;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        reap(child);
+        panic!("fake worker never signalled ready");
+    }
+
+    #[test]
+    fn check_lock_accepts_a_live_native_worker() {
+        let dir = tmp_work_dir("live-worker-lock");
+        let child = spawn_fake_worker(&dir, true);
+        let pgid = Pid::from_raw(child.id() as i32);
+        fs::write(lock_path(&dir), pgid.as_raw().to_string()).unwrap();
+        assert_eq!(PipelineJob::check_lock(&dir), Some(pgid));
+        reap(child);
+    }
+
+    #[test]
+    fn check_lock_rejects_a_worker_that_is_not_a_group_leader() {
+        let dir = tmp_work_dir("nonleader-worker-lock");
+        let child = spawn_fake_worker(&dir, false);
+        fs::write(lock_path(&dir), child.id().to_string()).unwrap();
+        assert!(PipelineJob::check_lock(&dir).is_none());
+        reap(child);
+    }
+
     #[test]
     fn check_lock_clears_lock_when_pid_reused_by_unrelated_process() {
         let dir = tmp_work_dir("reused-pid-lock");
@@ -1241,5 +1279,88 @@ mod reattach_tests {
         job.poll();
 
         assert_eq!(job.completed_segments, 5);
+    }
+
+    /// A reattached job on a live process group, with `total` segments expected.
+    fn reattached_with(dir: &Path, child: &Child, total: u64) -> PipelineJob {
+        let seg_dir = dir.join("segments");
+        fs::create_dir_all(&seg_dir).unwrap();
+        let mut job = PipelineJob::attach_running(
+            Pid::from_raw(child.id() as i32),
+            "test",
+            Path::new("/nonexistent/input.mkv"),
+            seg_dir,
+            dir.join("out.mkv"),
+            30,
+        );
+        job.total_segments = total;
+        job
+    }
+
+    fn sleeper_group() -> Child {
+        use std::os::unix::process::CommandExt as _;
+        Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap()
+    }
+
+    fn segment(dir: &Path, n: u32) {
+        fs::write(dir.join(format!("segments/seg_{n:03}.mp4")), b"data").unwrap();
+    }
+
+    #[test]
+    fn stop_after_segment_interrupts_the_group_once_the_next_segment_lands() {
+        let dir = tmp_work_dir("stop-after");
+        let mut child = sleeper_group();
+        let mut job = reattached_with(&dir, &child, 5);
+        segment(&dir, 0);
+        job.poll();
+        job.request_stop_after_segment();
+        assert!(job.stopping_after_segment());
+
+        job.poll(); // the segment in progress has not finished: still running
+        assert!(child.try_wait().unwrap().is_none());
+        assert!(job.stopping_after_segment());
+
+        segment(&dir, 1);
+        job.poll(); // it finished: SIGINT to the group
+        assert!(!job.stopping_after_segment());
+        let status = child.wait().unwrap();
+        assert_eq!(
+            std::os::unix::process::ExitStatusExt::signal(&status),
+            Some(nix::sys::signal::Signal::SIGINT as i32)
+        );
+    }
+
+    #[test]
+    fn stop_after_segment_leaves_the_final_concat_alone() {
+        let dir = tmp_work_dir("stop-final");
+        let mut child = sleeper_group();
+        let mut job = reattached_with(&dir, &child, 2);
+        segment(&dir, 0);
+        job.poll();
+        job.request_stop_after_segment();
+        segment(&dir, 1); // every segment is done: the job is concatenating
+        job.poll();
+        assert!(!job.stopping_after_segment(), "the request is dropped");
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "and nothing is signalled"
+        );
+        reap(child);
+    }
+
+    #[test]
+    fn a_reattached_job_that_finished_reports_success_from_the_output_file() {
+        let dir = tmp_work_dir("attach-success");
+        let mut quick = Command::new("/bin/true").spawn().unwrap();
+        let mut job = reattached_with(&dir, &quick, 1);
+        quick.wait().unwrap();
+        fs::write(dir.join("out.mkv"), b"x").unwrap();
+        job.poll();
+        assert!(job.done);
+        assert_eq!(job.exit_ok, Some(true));
     }
 }
