@@ -1649,3 +1649,60 @@ mod suggest_viewer_name_tests {
         assert_eq!(suggest_viewer_name(p), "Ted Baryluks Grocery.mkv");
     }
 }
+
+#[cfg(test)]
+mod stale_work_dir_tests {
+    use super::UpscalePanel;
+    use crate::config::Config;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn setup(name: &str, saved: Option<&str>) -> (Config, PathBuf, PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("vhs-gui-stale-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let work = root.join("clip");
+        fs::create_dir_all(work.join("segments")).unwrap();
+        fs::write(work.join("segments/seg_000.mp4"), b"data").unwrap();
+        if let Some(model) = saved {
+            fs::write(
+                work.join("run_config.txt"),
+                format!("MODEL={model}\nCRF=21"),
+            )
+            .unwrap();
+        }
+        let cfg = Config {
+            work_root: root.clone(),
+            ..Config::default()
+        };
+        (cfg, root, work)
+    }
+
+    fn run(cfg: &Config, model: Option<&str>) {
+        UpscalePanel::clear_stale_work_dir(Path::new("/in/clip.mkv"), cfg, model);
+    }
+
+    #[test]
+    fn a_different_model_discards_the_old_checkpoints() {
+        let (cfg, root, work) = setup("differs", Some("realesrgan-x4plus"));
+        run(&cfg, Some("realesrgan-x4plus-anime"));
+        assert!(!work.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_same_model_keeps_them_for_resuming() {
+        let (cfg, root, work) = setup("same", Some("realesrgan-x4plus"));
+        run(&cfg, Some("realesrgan-x4plus"));
+        assert!(work.join("segments/seg_000.mp4").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_work_dir_without_a_saved_config_is_left_alone() {
+        let (cfg, root, work) = setup("noconfig", None);
+        run(&cfg, Some("realesrgan-x4plus"));
+        assert!(work.join("segments/seg_000.mp4").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+}
