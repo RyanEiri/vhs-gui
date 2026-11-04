@@ -1107,4 +1107,73 @@ mod golden {
             |_| {},
         );
     }
+
+    #[test]
+    #[ignore]
+    fn the_anime_engine_matches_vhs_upscale_anime_sh() {
+        let base = StubCfg::default();
+        compare(
+            "gold-anime",
+            Variant::Anime,
+            "vhs_upscale_anime.sh",
+            base.clone(),
+            |s| s.model = Variant::Anime.default_model().into(),
+        );
+        compare(
+            "gold-anime-short",
+            Variant::Anime,
+            "vhs_upscale_anime.sh",
+            StubCfg {
+                duration: 12.0,
+                ..base.clone()
+            },
+            |s| s.model = Variant::Anime.default_model().into(),
+        );
+        compare(
+            "gold-anime-rocm",
+            Variant::Anime,
+            "vhs_upscale_anime.sh",
+            base,
+            |s| {
+                s.backend = Backend::Rocm;
+                s.model = Variant::Anime.default_model().into();
+                s.crush = "medium".into();
+                s.segment_secs = 20;
+            },
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn the_bw_engine_matches_vhs_upscale_bw_sh() {
+        let base = StubCfg::default();
+        compare(
+            "gold-bw",
+            Variant::Bw,
+            "vhs_upscale_bw.sh",
+            base.clone(),
+            |_| {},
+        );
+        compare(
+            "gold-bw-noaudio",
+            Variant::Bw,
+            "vhs_upscale_bw.sh",
+            StubCfg {
+                audio: false,
+                ..base.clone()
+            },
+            |_| {},
+        );
+        compare(
+            "gold-bw-rocm",
+            Variant::Bw,
+            "vhs_upscale_bw.sh",
+            base,
+            |s| {
+                s.backend = Backend::Rocm;
+                s.crush = "medium".into();
+                s.brightness = "low".into();
+            },
+        );
+    }
 }
