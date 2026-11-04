@@ -51,10 +51,10 @@ DISPLAY=:0 ./target/debug/vhs-gui
   native-port work). An upscale job outlives the GUI that started it — `on_exit`
   doesn't cancel it, and a later vhs-gui process can find one still running via
   `PipelineJob::check_lock`/`attach_running` (reads `vhs_upscale.sh`'s own
-  `WORK_DIR/upscale.pgid`) and reattach for progress display and Cancel, instead of
+  `WORK_DIR/upscale.pgid`, written by the script or the native worker) and reattach for progress display and Cancel, instead of
   racing a second Real-ESRGAN process against the same checkpoint segments.
   `check_lock` only trusts the pid if it is a process-group leader whose
-  `/proc/<pid>/cmdline` names a `vhs_upscale*.sh` script (a SIGKILLed script leaves
+  `/proc/<pid>/cmdline` names a `vhs_upscale*.sh` script or the `upscale-worker` subcommand (a SIGKILLed script leaves
   a stale pgid file whose pid can be reused); a failing lock is deleted. Reattach
   takes the segment length from the running job's `WORK_DIR/run_config.txt`
   (`SEG_SECONDS`), not the UI slider.
