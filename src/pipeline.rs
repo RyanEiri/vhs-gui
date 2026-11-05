@@ -137,6 +137,13 @@ impl SeqCtx {
         self.shared.cancel_requested.load(Ordering::SeqCst)
     }
 
+    /// Append one line to the job's log.
+    pub fn log(&self, line: &str) {
+        if let Ok(mut f) = self.log_file.try_clone() {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+
     /// Run `cmd` to completion, stdout/stderr redirected to the job's log
     /// file (with pid tracked for `cancel()` while it runs). Returns
     /// success. This is exactly what a plain `Cmd` step does internally.

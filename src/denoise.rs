@@ -23,7 +23,9 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::audio_cleanup::{extract_full_args, remux_args, unique_work_dir};
+use crate::audio_cleanup::{
+    checked_sox_step, extract_full_args, remux_args, sox_command, unique_work_dir,
+};
 use crate::config::Config;
 use crate::pipeline::{PipelineJob, SeqStep};
 use crate::tools::{self, Tool};
@@ -94,14 +96,23 @@ pub fn launch(input: &Path, cfg: &Config, label: String) -> anyhow::Result<Launc
     }
     fs::create_dir_all(cfg.stabilized_dir())?;
 
-    let work_dir = unique_work_dir("denoise");
+    let work_dir = unique_work_dir("denoise", &output);
     fs::create_dir_all(&work_dir)?;
     let seq: Vec<(&'static str, SeqStep)> = steps(input, &output, &work_dir)
         .into_iter()
-        .map(|s| {
-            let mut cmd = tools::command(s.tool);
-            cmd.args(&s.args);
-            (s.label, SeqStep::Cmd(cmd))
+        .map(|s| match s.tool {
+            Tool::Sox => {
+                let mut cmd = sox_command(&work_dir);
+                cmd.args(&s.args);
+                // The only sox step is full.wav -> norm.wav, which keeps the length.
+                let wavs = (PathBuf::from(&s.args[0]), PathBuf::from(&s.args[1]));
+                (s.label, checked_sox_step(cmd, Some(wavs)))
+            }
+            tool => {
+                let mut cmd = tools::command(tool);
+                cmd.args(&s.args);
+                (s.label, SeqStep::Cmd(cmd))
+            }
         })
         .collect();
 
@@ -404,13 +415,13 @@ mod tests {
         );
 
         // The scratch work directory is gone.
-        let leftovers = fs::read_dir(std::env::temp_dir())
+        let leftovers = fs::read_dir(cfg.stabilized_dir())
             .unwrap()
             .filter_map(Result::ok)
             .filter(|e| {
                 e.file_name()
                     .to_string_lossy()
-                    .starts_with(&format!("vhs-gui-denoise-{}-", std::process::id()))
+                    .starts_with(&format!(".vhs-gui-denoise-{}-", std::process::id()))
             })
             .count();
         assert_eq!(leftovers, 0, "work dir not cleaned up");

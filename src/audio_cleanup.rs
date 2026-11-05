@@ -11,7 +11,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
@@ -136,12 +136,70 @@ pub fn output_path(input: &Path) -> PathBuf {
 }
 
 /// A fresh scratch directory path under the system temp dir (not created).
-pub(crate) fn unique_work_dir(prefix: &str) -> PathBuf {
+pub(crate) fn unique_work_dir(prefix: &str, beside: &Path) -> PathBuf {
     let ts = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    std::env::temp_dir().join(format!("vhs-gui-{prefix}-{}-{ts}", std::process::id()))
+    // A hidden directory next to the output: the intermediate WAVs of a long capture run to many
+    // gigabytes each, and `/tmp` is usually RAM-backed (a 4 h 45 min capture exhausted it and the
+    // job was OOM-killed), whereas the output's own filesystem has to hold the result anyway.
+    let base = beside
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map_or_else(std::env::temp_dir, Path::to_path_buf);
+    base.join(format!(".vhs-gui-{prefix}-{}-{ts}", std::process::id()))
+}
+
+/// `sox` with its own temporary files kept in `work` (sox buffers a whole file for `norm`, and
+/// would otherwise use `/tmp`).
+pub(crate) fn sox_command(work: &Path) -> Command {
+    let mut cmd = tools::command(Tool::Sox);
+    cmd.arg("--temp").arg(work);
+    cmd
+}
+
+/// Whether a finished sox run really worked. SoX_ng exits 0 after "sox FAIL ... error writing
+/// output file: No space left on device", so the exit status alone cannot be trusted: the message
+/// is checked too, and for a WAV-to-WAV step (same length in and out) so is the size of the result.
+pub(crate) fn sox_verdict(
+    exited_ok: bool,
+    text: &str,
+    wav_io: Option<(&Path, &Path)>,
+) -> Result<(), String> {
+    if !exited_ok {
+        return Err("sox exited with an error".into());
+    }
+    if let Some(line) = text.lines().find(|l| l.contains("sox FAIL")) {
+        return Err(line.trim().to_string());
+    }
+    if let Some((input, output)) = wav_io {
+        let len = |p: &Path| fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        let (want, got) = (len(input), len(output));
+        if got == 0 || got < want - want / 100 {
+            return Err(format!(
+                "sox wrote {got} bytes to {} for a {want}-byte input",
+                output.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A sox command as a sequence step that fails (and says why in the job log) when `sox_verdict`
+/// does, so a broken intermediate never reaches the remux.
+pub(crate) fn checked_sox_step(cmd: Command, wav_io: Option<(PathBuf, PathBuf)>) -> SeqStep {
+    SeqStep::Fn(Box::new(move |ctx| {
+        let (exited_ok, text) = ctx.run_captured(cmd);
+        let io = wav_io.as_ref().map(|(i, o)| (i.as_path(), o.as_path()));
+        match sox_verdict(exited_ok, &text, io) {
+            Ok(()) => true,
+            Err(why) => {
+                ctx.log(&format!("ERROR: {why}"));
+                false
+            }
+        }
+    }))
 }
 
 /// ffmpeg arguments that extract the first audio stream as 48 kHz stereo PCM WAV with the
@@ -212,7 +270,7 @@ pub fn launch(
         fs::create_dir_all(dir)?;
     }
 
-    let work_dir = unique_work_dir("audiocleanup");
+    let work_dir = unique_work_dir("audiocleanup", output);
     fs::create_dir_all(&work_dir)?;
 
     let full_wav = work_dir.join("full.wav");
@@ -251,7 +309,7 @@ pub fn launch(
         ])
         .arg(&sample_wav);
 
-    let mut noiseprof = tools::command(Tool::Sox);
+    let mut noiseprof = sox_command(&work_dir);
     noiseprof
         .arg(&sample_wav)
         .args(["-n", "noiseprof"])
@@ -266,7 +324,7 @@ pub fn launch(
     let mut steps: Vec<(&'static str, SeqStep)> =
         vec![("Extracting audio...", SeqStep::Cmd(extract_full))];
     let noisered_input = if params.hum_enable {
-        let mut hum_notch = tools::command(Tool::Sox);
+        let mut hum_notch = sox_command(&work_dir);
         hum_notch.arg(&full_wav).arg(&hum_wav).args([
             "bandreject",
             &HUM_HZ.to_string(),
@@ -278,13 +336,16 @@ pub fn launch(
             &(HUM_HZ * 3).to_string(),
             "2q",
         ]);
-        steps.push(("Notching hum...", SeqStep::Cmd(hum_notch)));
+        steps.push((
+            "Notching hum...",
+            checked_sox_step(hum_notch, Some((full_wav.clone(), hum_wav.clone()))),
+        ));
         hum_wav
     } else {
         full_wav.clone()
     };
 
-    let mut noisered = tools::command(Tool::Sox);
+    let mut noisered = sox_command(&work_dir);
     noisered
         .arg(&noisered_input)
         .arg(&clean_wav)
@@ -293,8 +354,14 @@ pub fn launch(
         .arg(&nr_amount);
 
     steps.push(("Sampling noise profile...", SeqStep::Cmd(extract_sample)));
-    steps.push(("Building noise profile...", SeqStep::Cmd(noiseprof)));
-    steps.push(("Reducing broadband noise...", SeqStep::Cmd(noisered)));
+    steps.push((
+        "Building noise profile...",
+        checked_sox_step(noiseprof, None),
+    ));
+    steps.push((
+        "Reducing broadband noise...",
+        checked_sox_step(noisered, Some((noisered_input.clone(), clean_wav.clone()))),
+    ));
     steps.push((
         "Loudness normalizing...",
         SeqStep::Fn(loudnorm_step(
@@ -550,6 +617,91 @@ fn measure_rms(input: &Path, start_secs: f64, len_secs: f64) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("vhs-gui-sox-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn the_work_dir_is_hidden_and_beside_the_output() {
+        let d = unique_work_dir(
+            "denoise",
+            Path::new("/media/Patriot/stabilized/x_STABLE.mkv"),
+        );
+        assert_eq!(d.parent(), Some(Path::new("/media/Patriot/stabilized")));
+        assert!(
+            d.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".vhs-gui-denoise-")
+        );
+    }
+
+    #[test]
+    fn sox_ng_failing_with_exit_zero_is_still_a_failure() {
+        let msg = "sox FAIL norm: error writing temporary file: Disk quota exceeded\n";
+        assert!(sox_verdict(true, msg, None).is_err());
+        assert!(sox_verdict(false, "", None).is_err());
+        assert!(sox_verdict(true, "", None).is_ok());
+    }
+
+    #[test]
+    fn a_truncated_or_empty_wav_result_is_a_failure() {
+        let d = scratch("verdict");
+        let (i, o) = (d.join("in.wav"), d.join("out.wav"));
+        fs::write(&i, vec![0u8; 10_000]).unwrap();
+        assert!(sox_verdict(true, "", Some((&i, &o))).is_err(), "missing");
+        fs::write(&o, b"").unwrap();
+        assert!(sox_verdict(true, "", Some((&i, &o))).is_err(), "empty");
+        fs::write(&o, vec![0u8; 5_000]).unwrap();
+        assert!(sox_verdict(true, "", Some((&i, &o))).is_err(), "half");
+        fs::write(&o, vec![0u8; 9_950]).unwrap();
+        assert!(
+            sox_verdict(true, "", Some((&i, &o))).is_ok(),
+            "header slack"
+        );
+        let _ = fs::remove_dir_all(d);
+    }
+
+    /// The incident: sox prints `sox FAIL` and exits 0, and the steps after it must not run.
+    #[test]
+    fn a_sox_that_fails_with_exit_zero_stops_the_job_before_the_next_step() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let d = scratch("seq");
+        let sox = d.join("sox");
+        fs::write(
+            &sox,
+            "#!/bin/sh\necho 'sox FAIL sox_ng: error writing output file' >&2\nexit 0\n",
+        )
+        .unwrap();
+        fs::set_permissions(&sox, fs::Permissions::from_mode(0o755)).unwrap();
+        let marker = d.join("remux-ran");
+        let mut next = Command::new("touch");
+        next.arg(&marker);
+        let input = d.join("in.mkv");
+        fs::write(&input, b"x").unwrap();
+
+        let steps = vec![
+            ("Normalizing...", checked_sox_step(Command::new(&sox), None)),
+            ("Muxing...", SeqStep::Cmd(next)),
+        ];
+        let mut job =
+            PipelineJob::start_native_sequence("t", &input, steps, None, &d.join("logs")).unwrap();
+        for _ in 0..500 {
+            job.poll();
+            if job.done {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(job.done);
+        assert_eq!(job.exit_ok, Some(false));
+        assert!(!marker.exists(), "the step after the failed sox ran");
+        let _ = fs::remove_dir_all(d);
+    }
 
     #[test]
     fn output_path_plain_edit_master() {
