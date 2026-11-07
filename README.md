@@ -37,10 +37,10 @@ day-to-day interface for tape digitization.
 external pipeline scripts. Operations it performs (deinterlace, upscale, denoise,
 etc.) are implemented natively in Rust, spawning only the underlying media tools
 directly (ffmpeg, VapourSynth's `vspipe`, Real-ESRGAN) — never a wrapper script.
-This is a deliberate, ongoing migration (see "Native-Rust port status" below); some
-operations still shell out to scripts from the sibling
-[vhs-cli](https://github.com/RyanEiri/vhs-cli) repo as a transitional measure while
-that migration is in progress, tracked explicitly in `src/config.rs`.
+This is a deliberate, ongoing migration (see "Native-Rust port status" below). Only the
+upscale *Script* engine (the default until a real tape-length upscale matches the native one) still
+shells out to scripts from the sibling [vhs-cli](https://github.com/RyanEiri/vhs-cli) repo;
+everything else is native.
 
 There's also a bash/CLI version of this same pipeline,
 [vhs-cli](https://github.com/RyanEiri/vhs-cli) — useful for terminal/scripted
@@ -168,13 +168,13 @@ starts and mpv plays the capture's own UDP preview.
 
 ## Native-Rust port status
 
-`vhs-gui` is migrating away from shelling out to bash pipeline scripts, phase by
-phase, toward being fully self-contained. Each phase replaces a handful of
-bash-backed buttons with native Rust that spawns the underlying tools (ffmpeg,
-`vspipe`, Real-ESRGAN) directly — never a wrapper script. `src/config.rs` marks each
-remaining bash-backed operation with a `// TODO(native-port)` comment so the
-remaining surface area is always visible in the source. The phase plan and to-do list
-for becoming fully self-contained and portable is in [`ROADMAP.md`](ROADMAP.md).
+`vhs-gui` is migrating away from bash pipeline scripts toward being self-contained. Done: the tools
+resolver, embedded VapourSynth scripts, Viewer Encode, Denoise and Denoise+QTGMC, capture and
+monitor, and the upscale engine for all three variants (selectable as *Native (beta)*). Left: making
+native the default and deleting the script call sites (waits on a tape-length upscale that matches
+the script), VapourSynth setup on a fresh machine, and a portable package. `src/config.rs` marks the
+remaining script accessors with `// TODO(native-port)`. The plan and to-do list are in
+[`ROADMAP.md`](ROADMAP.md).
 
 ## System dependency notes
 
@@ -191,7 +191,8 @@ for becoming fully self-contained and portable is in [`ROADMAP.md`](ROADMAP.md).
   (official + community VHS-tuned, both `.pth` and ncnn formats) from
   [vhs-cli's `models-v1` release](https://github.com/RyanEiri/vhs-cli/releases/tag/models-v1).
 - VapourSynth R55 (`/usr/bin/vspipe`, PPA build) + `PYTHONPATH` pointing at
-  `~/.local/share/vsrepo/py` for the deinterlace/telecine operations. `vspipe`
-  embeds Python 3.12 (the system Python is 3.14), so keep the `libpython3.12`
-  packages installed.
+  `~/.local/share/vsrepo/py` (needs only `havsfunc` and `vsutil`) for the deinterlace/telecine
+  operations. `vspipe` embeds Python 3.12 (the system Python is 3.14), so keep the `libpython3.12`
+  packages installed. R81 from PyPI (Python 3.14) also works: the plugin loader and a znedi3 shim
+  handle it; see `ROADMAP.md` Phase 6a.
 - Built with Rust 1.98 (edition 2024) on Ubuntu 26.04.1.
