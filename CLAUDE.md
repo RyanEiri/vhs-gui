@@ -40,8 +40,9 @@ DISPLAY=:0 ./target/debug/vhs-gui
 - **`src/app.rs`** — shell: owns `Config`, `MpvView`, `MonitorPanel`, `UpscalePanel`,
   `ViewMode`, debounced settings persistence. Icon-only left rail switches between
   Monitor and Upscale views; each has its own collapsible settings side panel.
-- **`src/pipeline.rs`** — `PipelineJob`: spawns a job (currently `bash <script>
-  <input>`, `.process_group(0)` so `killpg()` never reaches vhs-gui itself), tails
+- **`src/pipeline.rs`** — `PipelineJob`: spawns a job (`start_native_single`, `start_native_pipe`,
+  `start_native_sequence`; only the upscale Script engine still runs `bash <script> <input>`),
+  always with `.process_group(0)` so `killpg()` never reaches vhs-gui itself; tails
   its log for ffmpeg `frame=`/`time=` progress (**time-based progress**, not
   frame-based — robust to fps changes from QTGMC/VDecimate), and exposes
   pause/resume/cancel via `killpg(SIGSTOP/SIGCONT/SIGINT)`. Upscale jobs additionally
@@ -132,9 +133,12 @@ DISPLAY=:0 ./target/debug/vhs-gui
   terminates it if the GUI dies, unlike a capture; `stop` = SIGINT, `kill` = SIGKILL, reaped by
   `poll`). Ignored hardware tests check the stream and the monitor-capture-monitor handoff on the
   real grabber (GUI must be closed).
-- **`src/vs_stack.rs`** — presence check (not import) for the VapourSynth plugins and the havsfunc
-  Python modules the scripts need; feeds the Tools window and toolbar warning. Keep `NEEDS` in step
-  with the `vhs_plugins.load(...)` calls in `assets/vs/*.vpy` and the modules `havsfunc` imports.
+- **`src/vs_stack.rs`** — presence check (not import) for the VapourSynth plugins and the two Python
+  modules the scripts need (`havsfunc`, `vsutil`); feeds the Tools window and toolbar warning. Keep
+  `NEEDS` in step with the `vhs_plugins.load(...)` calls in `assets/vs/*.vpy`. It also accepts R81's
+  plugin names (`mvtools.so`, `znedi3.so`, `vivtc.so`) and the plugin folder next to a pip `vspipe`.
+  `mvsfunc`, `adjust`, `nnedi3_resample` are deliberately absent (havsfunc imports them only in
+  functions we never call; they have no licence to ship).
 - **`tools/realesrgan-rocm/`** — source of the ROCm upscaler (`driver.py`, `requirements.txt`, the
   `realesrgan-rocm` shim). Installed by hand into `~/opt/realesrgan-rocm` and `~/bin` per
   `docs/INSTALL.md`; the app calls the installed shim, not these files.
@@ -153,9 +157,9 @@ DISPLAY=:0 ./target/debug/vhs-gui
 
 ## Transitional bash dependency
 
-`src/config.rs` still has `*_script()` accessors pointing at
-`~/Videos/vhs-cli/vhs_*.sh` for operations not yet natively ported. Each is marked
-`// TODO(native-port): remove once <op> is ported`. When porting an operation:
+`src/config.rs` still has the three `upscale*_script()` accessors (plus `scripts_dir`) pointing at
+`~/Videos/vhs-cli/vhs_upscale*.sh`, for the upscale Script engine; they go in phase 5d (see
+ROADMAP.md). Each is marked `// TODO(native-port)`. When porting an operation:
 extend `PipelineJob` with new native-spawn constructors rather than a parallel
 struct (the GUI already renders progress/pause/cancel off `Option<PipelineJob>` —
 keep that surface stable), spawn the underlying tool(s) directly with
