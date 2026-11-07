@@ -69,9 +69,10 @@ directories; `VS_PLUGIN_DIRS` overrides): `libffms2.so`, `libvivtc.so`, `libmvto
 `libvivtc.so` comes with the VapourSynth package (`/usr/lib/x86_64-linux-gnu/vapoursynth`); the
 others were installed with [vsrepo](https://github.com/vapoursynth/vsrepo).
 
-`havsfunc` (QTGMC) needs these Python modules in `~/.local/share/vsrepo/py`: `havsfunc`, `vsutil`,
-`mvsfunc`, `adjust`, `nnedi3_resample`. vhs-gui puts that directory on `PYTHONPATH` for `vspipe`.
-All five were installed by vsrepo (vsutil's `INSTALLER` file says so).
+`havsfunc` (QTGMC) needs two Python modules in `~/.local/share/vsrepo/py`: `havsfunc` and `vsutil`.
+vhs-gui puts that directory on `PYTHONPATH` for `vspipe`. (vsrepo also installs `mvsfunc`, `adjust` and
+`nnedi3_resample` because havsfunc declares them, but havsfunc only imports them inside functions that
+vhs-gui does not use, so they are not required.) Both were installed by vsrepo.
 
 vsrepo's package names differ from the file names: `libmiscfilters.so` is the package **`misc`**
 ("Miscfilters (obsolete)"), `libffms2.so` is `ffms2`, and so on. These names exist in vsrepo's

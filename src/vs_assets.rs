@@ -291,4 +291,32 @@ mod tests {
         let out = run_loader("nowhere", &[], None, body);
         assert_eq!(out, "missing");
     }
+
+    const FAKE_HAVSFUNC: &str = "import types\n\
+        haf = types.ModuleType('havsfunc')\n\
+        haf.core = vs.core\n\
+        original = haf.core\n";
+
+    #[test]
+    fn havsfunc_is_pointed_at_znedi3_when_only_znedi3_exists() {
+        // R81: znedi3 and `std` exist, nnedi3 does not.
+        let body = format!(
+            "{FAKE_HAVSFUNC}vhs_plugins.prepare_havsfunc(haf)\n\
+             print(haf.core.nnedi3 is vs.core.znedi3, haf.core.std is vs.core.std, haf.core is original)\n\
+             haf.core.num_threads = 3\n\
+             print(vs.core.num_threads)"
+        );
+        let out = run_loader("znedi3", &["znedi3", "std"], None, &body);
+        assert_eq!(out, "True True False\n3");
+    }
+
+    #[test]
+    fn havsfunc_is_left_alone_when_nnedi3_is_present_or_nothing_replaces_it() {
+        for (name, namespaces) in [("both", &["nnedi3", "znedi3"][..]), ("none", &[][..])] {
+            let body = format!(
+                "{FAKE_HAVSFUNC}vhs_plugins.prepare_havsfunc(haf)\nprint(haf.core is original)"
+            );
+            assert_eq!(run_loader(name, namespaces, None, &body), "True", "{name}");
+        }
+    }
 }

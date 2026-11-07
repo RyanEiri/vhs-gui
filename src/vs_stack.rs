@@ -28,7 +28,10 @@ pub struct Need {
     pub used_by: &'static str,
 }
 
-pub const NEEDS: [Need; 12] = [
+/// `mvsfunc`, `adjust` and `nnedi3_resample` are deliberately not listed: `havsfunc` imports them only
+/// inside functions the scripts never reach (BM3D denoising, `Tweak`, `SMDegrain`), they carry no licence
+/// to ship, and QTGMC and IVTC+Decomb were run on R81 without them.
+pub const NEEDS: [Need; 9] = [
     Need {
         name: "libffms2.so",
         kind: Kind::Plugin,
@@ -71,21 +74,6 @@ pub const NEEDS: [Need; 12] = [
     },
     Need {
         name: "vsutil",
-        kind: Kind::Module,
-        used_by: "havsfunc",
-    },
-    Need {
-        name: "mvsfunc",
-        kind: Kind::Module,
-        used_by: "havsfunc",
-    },
-    Need {
-        name: "adjust",
-        kind: Kind::Module,
-        used_by: "havsfunc",
-    },
-    Need {
-        name: "nnedi3_resample",
         kind: Kind::Module,
         used_by: "havsfunc",
     },

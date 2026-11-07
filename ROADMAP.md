@@ -246,12 +246,22 @@ nothing on the system changed):
       the wheel names (`mvtools.so`, `znedi3.so`, `vivtc.so`) and finds the folder from `vspipe`.
       Checked 2026-11-07: loader on real R81 (scratch venv with the three wheels) and the QTGMC
       end-to-end tests on R55.
-- [ ] A `znedi3` variant of the QTGMC and IVTC+Decomb scripts for R81, chosen at runtime by the
-      detected VapourSynth version.
+- [x] QTGMC and IVTC+Decomb on R81 without a script variant: `vhs_plugins.prepare_havsfunc` replaces
+      havsfunc's module-level `core` by a proxy that answers `core.nnedi3` with `core.znedi3`, only when
+      the core has znedi3 and no nnedi3 (so R55 is untouched and upstream havsfunc is used unmodified).
+      Checked 2026-11-07 on an 8 s interlaced slice (re-interlaced from an edit master, since no raw
+      capture is left): QTGMC Slower R81 vs R55 PSNR 49.4 dB average (min 48.0), SSIM 0.996, 180 frames
+      each; IVTC+Decomb 144 frames each, PSNR 47.7 average (min 31.2: combed-frame repair differs
+      with the newer mvtools). Without the shim R81 fails with "No attribute with the name nnedi3".
 - [ ] First-run `vapoursynth config` for a bundled R81 (writes `~/.config/vapoursynth/vapoursynth.toml`,
       keyed by `libvsscript.so` path, so it coexists with R55); a package install script cannot do it.
-- [ ] Decide the `havsfunc` source for R81 (patched copy vs upstream 34, which needs `vsjetpack` and
-      is untested) and confirm licences for `mvsfunc`, `nnedi3_resample` and `adjust`.
+- [x] `havsfunc` source and licences (2026-11-07, GitHub licence API): `havsfunc` is Unlicense and
+      `vsutil` MIT, so both may be shipped or fetched. `mvsfunc`, `nnedi3_resample` and `adjust` have no
+      licence (all rights reserved), so they must not be bundled; none is needed: havsfunc imports them
+      only inside functions the app never calls, and QTGMC and IVTC+Decomb ran on R81 with only
+      `havsfunc` and `vsutil` on `PYTHONPATH`. They are no longer in `vs_stack::NEEDS`. A package ships
+      or downloads upstream `havsfunc` unmodified (the installed copy is upstream's Dec 2025 file,
+      which imports `vsutil`, not `vsjetpack`).
 - [ ] Run QTGMC on a real VHS capture under R81 (the spike used a downscaled, interlaced slice of a
       DVR recording because the captures folder was empty).
 - [ ] `cargo-deb` metadata and a clean-container build for each release; one `.deb` per series.
