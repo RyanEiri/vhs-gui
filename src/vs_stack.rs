@@ -3,7 +3,10 @@
 //! otherwise surfaces as an obscure error from inside `vspipe`. This only checks that files
 //! exist where the scripts will look; it does not import anything.
 //!
-//! Plugin directories mirror `assets/vs/vhs_plugins.py` (`VS_PLUGIN_DIRS` overrides). Module
+//! Plugin directories mirror `assets/vs/vhs_plugins.py` (`VS_PLUGIN_DIRS` overrides), including the
+//! plugin folder of an R81 `vspipe` (`<prefix>/lib/python*/site-packages/vapoursynth/plugins`,
+//! found from where `vspipe` resolves), whose API 4 plugins are named without `lib` and with `znedi3`
+//! in place of `nnedi3`. Module
 //! directories are `~/.local/share/vsrepo/py` plus anything on `PYTHONPATH`, matching what
 //! `vs_ops::build_vspipe` hands to `vspipe`.
 
@@ -113,7 +116,29 @@ pub fn plugin_dirs_from_env() -> Vec<PathBuf> {
         ]
         .map(PathBuf::from),
     );
+    if let Some(vspipe) = crate::tools::resolve(crate::tools::Tool::Vspipe) {
+        dirs.extend(own_plugin_dirs(&vspipe));
+    }
     dirs
+}
+
+/// The plugin folders of a pip-installed (R81) VapourSynth that `vspipe` belongs to: a wheel's
+/// `vspipe` sits in `<prefix>/bin`, its plugins in `<prefix>/lib/python*/site-packages/vapoursynth/plugins`.
+fn own_plugin_dirs(vspipe: &Path) -> Vec<PathBuf> {
+    let Some(prefix) = vspipe.parent().and_then(Path::parent) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(prefix.join("lib")) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().starts_with("python"))
+        .map(|e| e.path().join("site-packages/vapoursynth/plugins"))
+        .filter(|p| p.is_dir())
+        .collect();
+    found.sort();
+    found
 }
 
 pub fn module_dirs_from_env() -> Vec<PathBuf> {
@@ -135,8 +160,24 @@ fn find_module(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
     })
 }
 
+/// File names under which `name` may be installed: as listed, without the `lib` prefix (R81's API 4
+/// builds), and `libnnedi3.so` also as `znedi3.so` (R81 ships znedi3 in its place).
+fn plugin_names(name: &str) -> Vec<String> {
+    let mut names = vec![name.to_string()];
+    if let Some(bare) = name.strip_prefix("lib") {
+        names.push(bare.to_string());
+    }
+    if name == "libnnedi3.so" {
+        names.push("znedi3.so".to_string());
+    }
+    names
+}
+
 fn find_plugin(dirs: &[PathBuf], name: &str) -> Option<PathBuf> {
-    dirs.iter().map(|d| d.join(name)).find(|p| p.is_file())
+    let names = plugin_names(name);
+    dirs.iter()
+        .flat_map(|d| names.iter().map(move |n| d.join(n)))
+        .find(|p| p.is_file())
 }
 
 /// Look for every [`NEEDS`] entry in the given directories.
@@ -285,5 +326,45 @@ mod tests {
         fs::rename(s.0.join("plugins"), s.0.join("sys")).unwrap();
         let status = check_in(&[s.0.join("plugins"), s.0.join("sys")], &[s.0.join("py")]);
         assert!(problems(&status).is_empty());
+    }
+
+    /// What an R81 wheel install provides: API 4 plugins without the `lib` prefix, znedi3 for nnedi3.
+    fn r81_plugins(s: &Scratch) {
+        for f in ["mvtools.so", "znedi3.so", "vivtc.so", "nnedi3_weights.bin"] {
+            s.touch(&format!("r81/{f}"));
+        }
+    }
+
+    #[test]
+    fn r81_api4_plugins_satisfy_the_needs_they_replace() {
+        let s = Scratch::new("r81");
+        full(&s);
+        for n in ["libmvtools.so", "libnnedi3.so", "libvivtc.so"] {
+            fs::remove_file(s.0.join("plugins").join(n)).unwrap();
+        }
+        fs::remove_file(s.0.join("plugins/nnedi3_weights.bin")).unwrap();
+        // Without the R81 folder those four are missing...
+        let (p, m) = dirs(&s);
+        assert_eq!(problems(&check_in(&p, &m)).len(), 4);
+        // ...with it, nothing is.
+        r81_plugins(&s);
+        let with = check_in(&[s.0.join("plugins"), s.0.join("r81")], &m);
+        assert!(problems(&with).is_empty(), "{:?}", problems(&with));
+    }
+
+    #[test]
+    fn the_wheel_plugin_folder_is_found_from_vspipe() {
+        let s = Scratch::new("own");
+        s.touch("venv/bin/vspipe");
+        fs::create_dir_all(s.0.join("venv/lib/python3.14/site-packages/vapoursynth/plugins"))
+            .unwrap();
+        fs::create_dir_all(s.0.join("venv/lib/python3.99/other")).unwrap();
+        let found = own_plugin_dirs(&s.0.join("venv/bin/vspipe"));
+        assert_eq!(
+            found,
+            vec![s.0.join("venv/lib/python3.14/site-packages/vapoursynth/plugins")]
+        );
+        // A system vspipe has no such folder.
+        assert!(own_plugin_dirs(Path::new("/usr/bin/vspipe")).is_empty());
     }
 }

@@ -177,4 +177,118 @@ mod tests {
             }
         }
     }
+
+    /// Run `vhs_plugins.py` against a fake `vapoursynth` module. `namespaces` are the plugin
+    /// namespaces the fake core already has (R81 autoloads its own); `plugin_dir` is what a fake
+    /// `get_plugin_dir` returns (`None` leaves it out, as R55 does). Prints what happened.
+    fn run_loader(
+        name: &str,
+        namespaces: &[&str],
+        plugin_dir: Option<&Path>,
+        body: &str,
+    ) -> String {
+        let dir = scratch(name);
+        fs::create_dir_all(&dir).unwrap();
+        let loader = FILES
+            .iter()
+            .find(|(n, _)| *n == "vhs_plugins.py")
+            .unwrap()
+            .1;
+        fs::write(dir.join("vhs_plugins.py"), loader).unwrap();
+        let get_dir = plugin_dir.map_or(String::new(), |d| {
+            format!(
+                "vs.get_plugin_dir = lambda: {:?}\n",
+                d.display().to_string()
+            )
+        });
+        let fake = format!(
+            "import sys, types\n\
+             vs = types.ModuleType('vapoursynth')\n\
+             class Error(Exception): pass\n\
+             vs.Error = Error\n\
+             loaded = []\n\
+             class Std:\n    def LoadPlugin(self, path): loaded.append(path)\n\
+             class Core:\n    std = Std()\n\
+             core = Core()\n\
+             for ns in {namespaces:?}: setattr(core, ns, object())\n\
+             vs.core = core\n{get_dir}\
+             sys.modules['vapoursynth'] = vs\n\
+             sys.path.insert(0, {dir:?})\n\
+             import vhs_plugins\n{body}\n",
+            dir = dir.display().to_string(),
+        );
+        let out = std::process::Command::new("python3")
+            .args(["-I", "-c", &fake])
+            .env_remove("VS_PLUGIN_DIRS")
+            // `~` in the default directories must not find this machine's own plugins.
+            .env("HOME", &dir)
+            .output()
+            .unwrap();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn a_plugin_the_core_already_provides_is_not_loaded() {
+        // R81: the API 4 mvtools/znedi3 wheels are autoloaded; the API 3 files must not be touched.
+        let out = run_loader(
+            "provided",
+            &["mv", "znedi3"],
+            None,
+            "print(vhs_plugins.load('libmvtools.so'), vhs_plugins.load('libnnedi3.so'), loaded)",
+        );
+        assert_eq!(out, "None None []");
+    }
+
+    #[test]
+    fn a_missing_namespace_is_loaded_from_the_directory_as_before() {
+        // R55: nothing autoloaded, so the file is looked up by name and loaded.
+        let d = scratch("dirs");
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("libmvtools.so"), b"").unwrap();
+        let body = format!(
+            "import os; os.environ['VS_PLUGIN_DIRS'] = {:?}\nprint(vhs_plugins.load('libmvtools.so') == {:?}, loaded == [{:?}])",
+            d.display().to_string(),
+            d.join("libmvtools.so").display().to_string(),
+            d.join("libmvtools.so").display().to_string(),
+        );
+        let out = run_loader("load", &[], None, &body);
+        let _ = fs::remove_dir_all(&d);
+        assert_eq!(out, "True True");
+    }
+
+    #[test]
+    fn the_core_s_own_plugin_folder_is_searched_when_it_has_one() {
+        let own = scratch("own");
+        fs::create_dir_all(&own).unwrap();
+        fs::write(own.join("libffms2.so"), b"").unwrap();
+        let with = run_loader(
+            "with-own",
+            &[],
+            Some(&own),
+            "print(vhs_plugins.load('libffms2.so'))",
+        );
+        assert_eq!(with, own.join("libffms2.so").display().to_string());
+        // R55 has no get_plugin_dir: the same file is then not found.
+        let without = run_loader(
+            "without-own",
+            &[],
+            None,
+            "try:\n    vhs_plugins.load('libffms2.so')\nexcept FileNotFoundError:\n    print('missing')",
+        );
+        assert_eq!(without, "missing");
+        let _ = fs::remove_dir_all(&own);
+    }
+
+    #[test]
+    fn a_plugin_that_is_nowhere_is_reported_with_the_folders_searched() {
+        let body = "try:\n    vhs_plugins.load('libnothere.so')\nexcept FileNotFoundError as e:\n    print('missing' if 'libnothere.so' in str(e) else str(e))";
+        let out = run_loader("nowhere", &[], None, body);
+        assert_eq!(out, "missing");
+    }
 }
