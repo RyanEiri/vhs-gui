@@ -142,8 +142,8 @@ DISPLAY=:0 ./target/debug/vhs-gui
   `field_align`, `vdecimate` `.vpy` and the `vhs_plugins.py` plugin loader) embedded with
   `include_str!`. `materialize()` writes them to `$XDG_CACHE_HOME/vhs-gui/vs/<content-hash>/` and
   `vs_ops` runs vspipe from there with that dir first on `PYTHONPATH`. Plugins are looked up by file
-  name (`VS_PLUGIN_DIRS` overrides), never by absolute path. `havsfunc` and its Python helpers stay
-  external in `~/.local/share/vsrepo/py` (licences unconfirmed; see ROADMAP.md).
+  name (`VS_PLUGIN_DIRS` overrides), never by absolute path. `havsfunc` (Unlicense) and `vsutil` (MIT) stay
+  external in `~/.local/share/vsrepo/py`; `vhs_plugins.prepare_havsfunc` makes havsfunc call znedi3 on R81 (see ROADMAP.md).
 - **`src/mpv_view.rs`** — `MpvView` owns the leaked `&'static Mpv` and its
   `RenderContext`, GL thread only. Its `Drop` replaces the repaint callback with a
   zero-sized no-op before the context is freed: `libmpv2` frees the callback's
