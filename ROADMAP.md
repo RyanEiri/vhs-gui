@@ -240,8 +240,12 @@ nothing on the system changed):
   `core.nnedi3.nnedi3` to `core.znedi3.nnedi3` (3 lines) and no explicit loads for the two plugins
   (R81 autoloads its own plugin folder). VDecimate, IVTC and Field Align were frame-identical to R55.
 
-- [ ] `vhs_plugins.py` (and `vs_stack.rs`) also look in R81's plugin folder
-      (`vapoursynth.get_plugin_dir()`); no behaviour change on R55.
+- [x] `vhs_plugins.py` (and `vs_stack.rs`) also look in R81's plugin folder
+      (`vapoursynth.get_plugin_dir()`); no behaviour change on R55. `load` skips a file whose
+      namespace the core already provides (R81 autoloads `mv`, `znedi3`, `vivtc`); `vs_stack` accepts
+      the wheel names (`mvtools.so`, `znedi3.so`, `vivtc.so`) and finds the folder from `vspipe`.
+      Checked 2026-11-07: loader on real R81 (scratch venv with the three wheels) and the QTGMC
+      end-to-end tests on R55.
 - [ ] A `znedi3` variant of the QTGMC and IVTC+Decomb scripts for R81, chosen at runtime by the
       detected VapourSynth version.
 - [ ] First-run `vapoursynth config` for a bundled R81 (writes `~/.config/vapoursynth/vapoursynth.toml`,
