@@ -15,6 +15,8 @@ vhs_plugins.load("libffms2.so")
 vhs_plugins.load("libmvtools.so")
 vhs_plugins.load("libnnedi3.so")
 vhs_plugins.load("libmiscfilters.so")
+# R81 has znedi3 instead of nnedi3; havsfunc is told to call it (no effect on R55)
+vhs_plugins.prepare_havsfunc(haf)
 
 SRC = os.environ["VS_INPUT"]
 TFF = int(os.environ.get("VS_TFF", "1"))
