@@ -115,8 +115,14 @@ Recommended shape, replacing the earlier "two packages" idea:
       keeps working because the loader handles both.
 - [ ] Check the exact "or later" wording of the GPL-2.0 wheels against vhs-gui's GPL-3.0 before
       shipping them in a package.
-- [ ] First step if approved: build the three plugins from pinned source in a 24.04 container and
-      prove they load under R81.
+- [x] First step (2026-11-07): `scripts/build-vs-plugins.sh` builds the three plugins from pinned
+      source (`tools/vs-plugins/Dockerfile`: ffms2 5.0, fmtconv r30, miscfilters R2, headers
+      R81) in a container and loads them under R81: all three load, and ffms2 decodes, fmtc
+      resamples, misc lists its filters. Findings: (1) ffms2 links FFmpeg's shared libraries, so a
+      24.04 build (libavcodec.so.60) does not load on 26.04 (so.62): build one per target
+      release, or bundle ffmpeg libs; (2) the tag `ffms-2.17` is an old line, 5.0 is current;
+      (3) miscfilters has no build system, so it is one `g++` call, and it needs
+      `filtershared.h` from R73 (R81's copy uses an API 4.3 call); (4) fmtconv is 4.7 MB stripped.
 - [ ] Run QTGMC on a real raw capture under R81 (none is left: the archival was deleted after
       editing, so a new capture is needed).
 - [ ] Optional later: AppImage (linuxdeploy + appimagetool) with `libmpv.so.2`, ffmpeg, ffprobe and
