@@ -33,6 +33,8 @@ if tool == "ffprobe":
             print(i["dur"])
         else:
             print(cfg["duration"])
+    elif "packet=pts_time" in j: print("0.000000")
+    elif "format=start_time" in j: print("0.000000")
     elif "stream=r_frame_rate" in j: print(cfg["fps"])
     elif "stream=width" in j: print(cfg["w"])
     elif "stream=height" in j: print(cfg["h"])
@@ -47,7 +49,16 @@ if tool == "ffmpeg":
         d = os.path.dirname(out); os.makedirs(d, exist_ok=True)
         for k in range(1, cfg["frames"] + 1):
             open(os.path.join(d, "frame_%08d.jpg" % k), "wb").write(b"jpg")
-        open(os.path.join(state, "cur_len"), "w").write(args[args.index("-t") + 1])
+        # The segment's length: the window the engine's select keeps (cut off at the end of the
+        # source), or the `-t` the real scripts pass.
+        import re
+        m = re.search(r"gte\(t,(-?[0-9.]+)\)\*lt\(t,(-?[0-9.]+)\)", " ".join(args))
+        if m:
+            lo, hi = float(m.group(1)), float(m.group(2))
+            cur = str(round(min(hi, cfg["duration"]) - max(lo, 0.0), 2))
+        else:
+            cur = args[args.index("-t") + 1]
+        open(os.path.join(state, "cur_len"), "w").write(cur)
     elif "-framerate" in args:
         src = os.path.dirname(args[args.index("-i") + 1])
         n = len(glob.glob(os.path.join(src, "*.jpg"))) - cfg.get("rebuild_short_by", 0)
