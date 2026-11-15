@@ -19,6 +19,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
+use crate::crop::Crop;
 use crate::pipeline::PipelineJob;
 use crate::tools::{self, Tool};
 
@@ -50,8 +51,10 @@ pub struct Plan {
     pub profile: &'static str,
     pub level: &'static str,
     pub crf: u32,
-    /// `scale=` argument (`640:480`), or none to keep the source size.
-    pub scale: Option<&'static str>,
+    /// Output size for `scale=` (640x480), or none to keep the source size.
+    pub scale: Option<(u32, u32)>,
+    /// Letterbox crop applied before the scale, if the file has one.
+    pub crop: Option<Crop>,
     /// Constant frame rate passed to `-r`.
     pub cfr: String,
 }
@@ -82,7 +85,8 @@ pub fn plan(src: &Source) -> Plan {
             profile: "main",
             level: "4.0",
             crf: 18,
-            scale: Some("640:480"),
+            scale: Some((640, 480)),
+            crop: None,
             cfr: "30000/1001".into(),
         }
     } else {
@@ -93,16 +97,37 @@ pub fn plan(src: &Source) -> Plan {
             level: "4.1",
             crf: 20,
             scale: None,
+            crop: None,
             cfr: pick_cfr(src.fps),
         }
     }
 }
 
-/// `-vf` chain: optional Lanczos scale, square pixels, 4:2:0.
+impl Plan {
+    /// This plan with a letterbox crop. The VHS preset's 640x480 becomes the same share of the
+    /// frame, so a 720x276 picture cut from a 4:3 frame is scaled to 640x276 and keeps its shape;
+    /// the HD preset keeps the cropped size.
+    pub fn with_crop(mut self, src: &Source, crop: Crop) -> Plan {
+        if let Some((w, h)) = self.scale {
+            let even = |v: u32| v + v % 2;
+            self.scale = Some((
+                even(w * crop.w / src.width.max(1)),
+                even(h * crop.h / src.height.max(1)),
+            ));
+        }
+        self.crop = Some(crop);
+        self
+    }
+}
+
+/// `-vf` chain: optional crop, optional Lanczos scale, square pixels, 4:2:0.
 pub fn video_filter(plan: &Plan) -> String {
     let mut parts = Vec::new();
-    if let Some(s) = plan.scale {
-        parts.push(format!("scale={s}:flags=lanczos"));
+    if let Some(c) = &plan.crop {
+        parts.push(c.filter());
+    }
+    if let Some((w, h)) = plan.scale {
+        parts.push(format!("scale={w}:{h}:flags=lanczos"));
     }
     parts.push("setsar=1".to_string());
     parts.push("format=yuv420p".to_string());
@@ -215,7 +240,12 @@ pub enum Launch {
     Exists(PathBuf),
 }
 
-pub fn launch(input: &Path, cfg: &Config, label: String) -> anyhow::Result<Launch> {
+pub fn launch(
+    input: &Path,
+    cfg: &Config,
+    label: String,
+    crop: Option<Crop>,
+) -> anyhow::Result<Launch> {
     tools::require(Tool::Ffprobe)?;
     tools::require(Tool::Ffmpeg)?;
     if !input.is_file() {
@@ -227,7 +257,13 @@ pub fn launch(input: &Path, cfg: &Config, label: String) -> anyhow::Result<Launc
     }
     fs::create_dir_all(cfg.viewer_dir())?;
 
-    let plan = plan(&probe_source(input)?);
+    let source = probe_source(input)?;
+    let mut plan = plan(&source);
+    if let Some(c) = crop {
+        c.validate(source.width, source.height)
+            .map_err(|e| anyhow::anyhow!("invalid letterbox crop: {e}"))?;
+        plan = plan.with_crop(&source, c);
+    }
     let mut cmd = tools::command(Tool::Ffmpeg);
     cmd.args(ffmpeg_args(input, &output, &plan));
     let job = PipelineJob::start_native_single(label, input, cmd, &cfg.log_dir())?;
@@ -278,13 +314,74 @@ mod tests {
             let p = plan(&src(w, h, 25.0));
             assert_eq!(p.preset, Preset::Vhs, "{w}x{h}");
             assert_eq!(p.crf, 18);
-            assert_eq!(p.scale, Some("640:480"));
+            assert_eq!(p.scale, Some((640, 480)));
             // The VHS preset forces 29.97 regardless of the source rate, as the script does.
             assert_eq!(p.cfr, "30000/1001");
         }
         let hd = plan(&src(720, 577, 25.0));
         assert_eq!(hd.preset, Preset::Hd);
         assert_eq!((hd.crf, hd.scale, hd.x264_preset), (20, None, "medium"));
+    }
+
+    const LETTERBOX: Crop = Crop {
+        w: 720,
+        h: 276,
+        x: 0,
+        y: 98,
+    };
+
+    #[test]
+    fn a_letterbox_crop_goes_before_the_scale_and_keeps_the_picture_shape() {
+        let s = src(720, 480, 29.97);
+        let p = plan(&s).with_crop(&s, LETTERBOX);
+        assert_eq!(p.scale, Some((640, 276)));
+        assert_eq!(
+            video_filter(&p),
+            "crop=720:276:0:98,scale=640:276:flags=lanczos,setsar=1,format=yuv420p"
+        );
+        // Everything else about the VHS preset is unchanged.
+        let plain = plan(&s);
+        assert_eq!(
+            (p.crf, p.x264_preset, p.profile, p.level, &p.cfr),
+            (
+                plain.crf,
+                plain.x264_preset,
+                plain.profile,
+                plain.level,
+                &plain.cfr
+            )
+        );
+    }
+
+    #[test]
+    fn an_hd_source_is_cropped_but_not_scaled() {
+        let s = src(1920, 1080, 23.976);
+        let c = Crop {
+            w: 1920,
+            h: 800,
+            x: 0,
+            y: 140,
+        };
+        let p = plan(&s).with_crop(&s, c);
+        assert_eq!(p.scale, None);
+        assert_eq!(
+            video_filter(&p),
+            "crop=1920:800:0:140,setsar=1,format=yuv420p"
+        );
+    }
+
+    #[test]
+    fn a_narrower_crop_scales_in_proportion_and_stays_even() {
+        let s = src(720, 480, 29.97);
+        let c = Crop {
+            w: 640,
+            h: 276,
+            x: 40,
+            y: 98,
+        };
+        let (w, h) = plan(&s).with_crop(&s, c).scale.unwrap();
+        assert_eq!((w, h), (568, 276)); // 640 * 640 / 720, rounded down by integer division
+        assert!(w.is_multiple_of(2) && h.is_multiple_of(2));
     }
 
     #[test]
@@ -412,7 +509,7 @@ mod tests {
         assert!(made.success());
 
         let Launch::Started(mut job, output) =
-            launch(&input, &cfg, "smoke viewer encode".into()).unwrap()
+            launch(&input, &cfg, "smoke viewer encode".into(), None).unwrap()
         else {
             panic!("expected the encode to start");
         };
@@ -454,7 +551,7 @@ mod tests {
         );
 
         assert!(matches!(
-            launch(&input, &cfg, "again".into()),
+            launch(&input, &cfg, "again".into(), None),
             Ok(Launch::Exists(_))
         ));
     }

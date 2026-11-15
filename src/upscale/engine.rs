@@ -267,8 +267,19 @@ impl<'a> Engine<'a> {
         let (src_w, src_h) = (dim("width")?, dim("height")?);
 
         plan::validate_scales(spec.internal_scale, spec.final_scale).map_err(|e| anyhow!(e))?;
-        let size = plan::output_size(src_w, src_h, spec.final_scale, &spec.target_dar);
+        if let Some(c) = &spec.crop {
+            c.validate(src_w, src_h)
+                .map_err(|e| anyhow!("invalid letterbox crop: {e}"))?;
+        }
+        let size = plan::output_size(
+            src_w,
+            src_h,
+            spec.final_scale,
+            &spec.target_dar,
+            spec.crop.as_ref(),
+        );
         let filter = plan::pre_filter(spec.variant, &spec.crush, &spec.brightness)
+            .map(|f| plan::with_crop(&f, spec.crop.as_ref()))
             .map_err(|e| anyhow!(e))?;
         let total = plan::total_seconds(duration);
         Ok(Ctx {
@@ -665,6 +676,74 @@ mod tests {
         assert_eq!(extracts.len(), 3);
         assert_eq!(&extracts[2][2..5], ["60", "-t", "10"]);
         assert_eq!(kit.calls_of("upscaler").len(), 3);
+    }
+
+    #[test]
+    fn a_letterbox_crop_reaches_the_extract_filter_the_fingerprint_and_the_output_size() {
+        let mut kit = kit("up-crop");
+        kit.spec.crop = Some(crate::crop::Crop {
+            w: 720,
+            h: 276,
+            x: 0,
+            y: 98,
+        });
+        assert_eq!(run(&kit).unwrap(), Outcome::Done);
+        let filter = "crop=720:276:0:98,hqdn3d=3:2:4:3";
+
+        let calls = kit.calls_of("ffmpeg");
+        let vf_of = |a: &Vec<String>| {
+            let i = a.iter().position(|x| x == "-vf").expect("a -vf argument");
+            a[i + 1].clone()
+        };
+        let extract = calls
+            .iter()
+            .find(|a| a.get(1).map(String::as_str) == Some("-ss"))
+            .expect("an extract call");
+        assert_eq!(vf_of(extract), filter);
+        // 720x276 from a 4:3 720x480 frame at 2x is 1280x552.
+        let rebuild = calls
+            .iter()
+            .find(|a| a.iter().any(|x| x == "-framerate"))
+            .expect("a rebuild call");
+        assert!(
+            vf_of(rebuild).starts_with("scale=1280:552:flags=lanczos"),
+            "{}",
+            vf_of(rebuild)
+        );
+        assert_eq!(
+            fs::read_to_string(&kit.spec.layout().config_file).unwrap(),
+            plan::fingerprint(&kit.spec, "30000/1001", filter)
+        );
+    }
+
+    #[test]
+    fn resuming_without_the_crop_is_refused_like_any_changed_setting() {
+        let mut kit = kit("up-crop-mixed");
+        kit.spec.crop = Some(crate::crop::Crop {
+            w: 720,
+            h: 276,
+            x: 0,
+            y: 98,
+        });
+        run(&kit).unwrap();
+        fs::remove_file(kit.spec.layout().segment_path(2)).unwrap();
+        kit.spec.crop = None;
+        let err = run(&kit).unwrap_err().to_string();
+        assert!(err.contains("differs from the configuration"), "{err}");
+    }
+
+    #[test]
+    fn a_crop_outside_the_source_stops_the_job_before_any_work() {
+        let mut kit = kit("up-crop-bad");
+        kit.spec.crop = Some(crate::crop::Crop {
+            w: 720,
+            h: 600,
+            x: 0,
+            y: 98,
+        });
+        let err = run(&kit).unwrap_err().to_string();
+        assert!(err.contains("invalid letterbox crop"), "{err}");
+        assert!(kit.calls_of("upscaler").is_empty());
     }
 
     #[test]

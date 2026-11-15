@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::crop::Crop;
 pub use crate::settings::Backend;
 
 /// Which of the three scripts a job stands in for.
@@ -88,6 +89,9 @@ pub struct JobSpec {
     /// Skip the final A/V sync correction (tests only).
     #[serde(default)]
     pub skip_sync_fix: bool,
+    /// Letterbox crop applied before everything else in the filter chain. Old job files have none.
+    #[serde(default)]
+    pub crop: Option<Crop>,
 }
 
 impl JobSpec {
@@ -117,6 +121,7 @@ impl JobSpec {
             allow_mixed: false,
             batch_size: None,
             skip_sync_fix: false,
+            crop: None,
         }
     }
 
@@ -218,16 +223,39 @@ pub fn validate_scales(internal: u32, final_: u32) -> Result<(), String> {
 
 /// DAR-correct output size: `FINAL_H = src_h * FINAL_SCALE`, `FINAL_W = FINAL_H * num / den` made
 /// even (H.264). An empty or colon-less `target_dar` falls back to plain pixel scaling.
-pub fn output_size(src_w: u32, src_h: u32, final_scale: u32, target_dar: &str) -> (u32, u32) {
-    let h = src_h * final_scale;
+///
+/// With a `crop`, `target_dar` is still the *source's* display aspect: the height comes from the
+/// cropped picture and the width keeps the source's pixel shape, so 720x276 cut from a 4:3 720x480
+/// frame at 2x gives 1280x552.
+pub fn output_size(
+    src_w: u32,
+    src_h: u32,
+    final_scale: u32,
+    target_dar: &str,
+    crop: Option<&Crop>,
+) -> (u32, u32) {
+    let (pic_w, pic_h) = crop.map_or((src_w, src_h), |c| (c.w, c.h));
+    let h = pic_h * final_scale;
     if let Some((num, den)) = target_dar.split_once(':')
         && let (Ok(num), Ok(den)) = (num.parse::<u32>(), den.parse::<u32>())
         && den != 0
     {
-        let w = h * num / den;
+        // Widen to u64: `h * num * src_w` overflows u32 for large sources.
+        let w = (u64::from(h) * u64::from(num) * u64::from(pic_w) * u64::from(src_h)
+            / (u64::from(den) * u64::from(src_w) * u64::from(pic_h))) as u32;
         (w + w % 2, h)
     } else {
-        (src_w * final_scale, h)
+        (pic_w * final_scale, h)
+    }
+}
+
+/// The pre-filter chain with the crop, if any, in front of it, so frames are cropped before
+/// anything else touches them and the fingerprint's filter line records the crop.
+pub fn with_crop(filter: &str, crop: Option<&Crop>) -> String {
+    match crop {
+        Some(c) if filter.is_empty() => c.filter(),
+        Some(c) => format!("{},{filter}", c.filter()),
+        None => filter.to_string(),
     }
 }
 
@@ -558,12 +586,74 @@ mod tests {
     #[test]
     fn output_size_is_dar_correct_and_even() {
         // NTSC 720x480 at 2x: 960 tall, 4:3 wide = 1280.
-        assert_eq!(output_size(720, 480, 2, "4:3"), (1280, 960));
-        assert_eq!(output_size(720, 480, 1, "4:3"), (640, 480));
+        assert_eq!(output_size(720, 480, 2, "4:3", None), (1280, 960));
+        assert_eq!(output_size(720, 480, 1, "4:3", None), (640, 480));
         // Odd widths are rounded up to even.
-        assert_eq!(output_size(10, 3, 1, "4:3"), (4, 3));
-        assert_eq!(output_size(720, 480, 2, ""), (1440, 960));
-        assert_eq!(output_size(720, 480, 2, "garbage"), (1440, 960));
+        assert_eq!(output_size(10, 3, 1, "4:3", None), (4, 3));
+        assert_eq!(output_size(720, 480, 2, "", None), (1440, 960));
+        assert_eq!(output_size(720, 480, 2, "garbage", None), (1440, 960));
+    }
+
+    const LETTERBOX: Crop = Crop {
+        w: 720,
+        h: 276,
+        x: 0,
+        y: 98,
+    };
+
+    #[test]
+    fn a_crop_sets_the_height_and_keeps_the_source_pixel_shape() {
+        // 720x276 cut from a 4:3 720x480 frame: 2x is 552 tall and 1280 wide, not 1280x552 squashed.
+        assert_eq!(
+            output_size(720, 480, 2, "4:3", Some(&LETTERBOX)),
+            (1280, 552)
+        );
+        assert_eq!(
+            output_size(720, 480, 1, "4:3", Some(&LETTERBOX)),
+            (640, 276)
+        );
+        // Without a target aspect the pixels simply scale.
+        assert_eq!(output_size(720, 480, 2, "", Some(&LETTERBOX)), (1440, 552));
+        // A narrower crop narrows the display width in proportion; the result stays even.
+        let narrow = Crop {
+            w: 640,
+            x: 40,
+            ..LETTERBOX
+        };
+        let (w, h) = output_size(720, 480, 2, "4:3", Some(&narrow));
+        assert_eq!((w, h), (1138, 552));
+        assert!(w.is_multiple_of(2) && h.is_multiple_of(2));
+    }
+
+    #[test]
+    fn the_crop_comes_first_in_the_filter_and_changes_nothing_when_absent() {
+        let chain = pre_filter(Variant::Standard, "none", "").unwrap();
+        assert_eq!(with_crop(&chain, None), chain);
+        assert_eq!(
+            with_crop(&chain, Some(&LETTERBOX)),
+            "crop=720:276:0:98,hqdn3d=3:2:4:3"
+        );
+        assert_eq!(with_crop("", Some(&LETTERBOX)), "crop=720:276:0:98");
+    }
+
+    #[test]
+    fn an_old_job_file_without_a_crop_still_loads_and_the_crop_round_trips() {
+        let mut spec = JobSpec::defaults(
+            Variant::Standard,
+            Path::new("/in/a.mkv"),
+            Path::new("/out/a.mkv"),
+            Path::new("/work"),
+        );
+        let text = toml::to_string(&spec).unwrap();
+        let old = text
+            .lines()
+            .filter(|l| !l.starts_with("crop"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(toml::from_str::<JobSpec>(&old).unwrap(), spec);
+        spec.crop = Some(LETTERBOX);
+        let back: JobSpec = toml::from_str(&toml::to_string(&spec).unwrap()).unwrap();
+        assert_eq!(back.crop, Some(LETTERBOX));
     }
 
     #[test]

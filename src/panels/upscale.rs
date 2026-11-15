@@ -34,6 +34,8 @@ pub struct UpscalePanel {
     audio_cleanup_state: Option<(PathBuf, crate::audio_cleanup::Params)>,
     /// File a "Find Quiet Spot" scan is running for, and the scan itself.
     quiet_spot_scan: Option<(PathBuf, crate::audio_cleanup::QuietSpotScan)>,
+    /// Letterbox detection results, applied by the Upscale and Viewer Encode buttons.
+    letterbox: super::letterbox::Letterbox,
     last_preview_at: Option<std::time::Instant>,
     last_preview_frames: u64,
     preview_textures: Option<UpscalePreviewTextures>,
@@ -53,6 +55,7 @@ impl UpscalePanel {
             rename_state: None,
             audio_cleanup_state: None,
             quiet_spot_scan: None,
+            letterbox: Default::default(),
             last_preview_at: None,
             last_preview_frames: 0,
             preview_textures: None,
@@ -731,10 +734,14 @@ impl UpscalePanel {
             .and_then(|s| s.to_str())
             .unwrap_or("input")
             .to_string();
-        match crate::viewer_encode::launch(&input, cfg, format!("Viewer Encode {name}")) {
+        let crop = self.letterbox.crop_for(&input);
+        match crate::viewer_encode::launch(&input, cfg, format!("Viewer Encode {name}"), crop) {
             Ok(crate::viewer_encode::Launch::Started(mut job, output)) => {
                 job.output_path = Some(output);
                 *status = format!("Started: {}", job.label);
+                if let Some(c) = crop {
+                    *status = format!("{status} (cropped to {}x{})", c.w, c.h);
+                }
                 self.pipeline = Some(*job);
             }
             Ok(crate::viewer_encode::Launch::Exists(output)) => {
@@ -859,6 +866,14 @@ impl UpscalePanel {
             return;
         }
 
+        let crop = self.letterbox.crop_for(&input);
+        if crop.is_some() && self.settings.engine != UpscaleEngine::Native {
+            *status = "Letterbox crop needs the Native engine: switch Engine to Native, or turn \
+                       the crop off"
+                .into();
+            return;
+        }
+
         // Guaranteed correct regardless of whether the settings panel was
         // open (see sync_scale_to_model's doc comment) — a stale scale here
         // would both upscale at the wrong factor and corrupt the resume
@@ -869,13 +884,17 @@ impl UpscalePanel {
 
         // The native engine, run as a detached worker, for every variant.
         if self.settings.engine == UpscaleEngine::Native {
-            let spec =
+            let mut spec =
                 self.settings
                     .to_job_spec(variant, &input, &output, &cfg.upscale_work_root());
+            spec.crop = crop;
             match crate::upscale::start_worker(&spec, label, &cfg.log_dir()) {
                 Ok(job) => {
                     let job = job.with_upscale_tracking(seg_dir, output, seg_secs);
                     *status = format!("Started: {} (native engine)", job.label);
+                    if let Some(c) = crop {
+                        *status = format!("{status}, cropped to {}x{}", c.w, c.h);
+                    }
                     self.last_preview_at = None;
                     self.last_preview_frames = 0;
                     self.preview_textures = None;
@@ -1136,6 +1155,10 @@ impl UpscalePanel {
                     self.confirm_delete = None;
                 }
             });
+        }
+
+        if matches!(entry.kind, FileKind::EditMaster | FileKind::EditMasterVD) {
+            self.letterbox.show(ui, ctx, &entry.path, status);
         }
 
         // Rename UI (two-pass borrow pattern)
@@ -1492,7 +1515,7 @@ fn cleanup_upscale_work_dir(
     }
 }
 
-fn load_jpeg_as_egui_image(path: &std::path::Path) -> Option<egui::ColorImage> {
+pub(super) fn load_jpeg_as_egui_image(path: &std::path::Path) -> Option<egui::ColorImage> {
     let img = image::open(path).ok()?.into_rgba8();
     let (w, h) = img.dimensions();
     Some(egui::ColorImage::from_rgba_unmultiplied(
