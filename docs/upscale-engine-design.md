@@ -147,7 +147,7 @@ the source's pixel shape (`plan::output_size` with a crop: 720x276 from a 4:3 72
 ## 6. Status
 
 **5a done (2026-11-03):** `src/upscale/{plan,engine,worker}.rs`, the `upscale-worker` mode in `main`,
-the Script/Native engine setting (default Script), and native launch for the plain Upscale buttons.
+the Script/Native engine setting (default Script, removed in 5d), and native launch for the plain Upscale buttons.
 **5b done (2026-11-03):** Anime and B&W are wired to the native engine. The golden tests
 `the_anime_engine_matches_vhs_upscale_anime_sh` and `the_bw_engine_matches_vhs_upscale_bw_sh` compare
 calls and `run_config.txt` with the real scripts (a mutation of the B&W filter makes the test fail).
@@ -169,3 +169,6 @@ Evidence:
   frames, 8.008 s, and **bit-identical video frames and audio**.
 
 Not yet verified: a real tape-length upscale (gates the default flip, 5d); the GUI toggle by hand.
+
+**5d done (2026-11-14):** tape-length native runs on real material matched, the Script engine and its call
+sites are removed, and Native is the only engine. See ROADMAP.md.

@@ -56,8 +56,8 @@ finishes it. Last updated 2026-11-07.
 - [x] **Phase 5a-5c** native upscale engine (`src/upscale/`, design in
       `docs/upscale-engine-design.md`): detached `vhs-gui upscale-worker` so a job outlives the GUI;
       segment loop with `seg_part/` staging, frame checks, one auto-repair pass, concat, audio mux,
-      sync fix, byte-exact `run_config.txt`. All three variants wired (Engine setting: Script default /
-      Native beta). Golden tests per variant against the real scripts, worker integration tests (real
+      sync fix, byte-exact `run_config.txt`. All three variants wired (Engine setting, Script default /
+      Native beta; the setting was removed in 5d). Golden tests per variant against the real scripts, worker integration tests (real
       binary, SIGSTOP/CONT/INT/KILL), lock/reattach/stop-after-segment/stale-work-dir tests; a GPU
       test where script and worker gave bit-identical output on an 8 s clip (plain variant only; Ryan
       has not run Anime or B&W on real material). Dead `settings.denoise` removed; `DECOMB` (anime)
@@ -75,18 +75,26 @@ finishes it. Last updated 2026-11-07.
       VDecimate, IVTC and Field Align frame-identical. Licences: `havsfunc` Unlicense, `vsutil` MIT;
       `mvsfunc`, `nnedi3_resample`, `adjust` have none and are not needed (imported only in functions
       the app never calls), so they left `vs_stack::NEEDS`.
+- [x] **Phase 5d, native upscale only** (2026-11-14). Real tape-length runs of the native engine: 20, 25
+      and 30 min edit masters. Resume of a script-started work dir (the fingerprint check refused a
+      changed brightness, as designed), pause/resume, Stop after Segment (clean boundary) and Cancel
+      mid-segment (nothing partial left, the segment redone) all worked. The same test showed the
+      script leaving a partial segment as a checkpoint after a mid-encode stop, which the native
+      engine does not. Removed: the Script/Native setting, the three `upscale*_script()` accessors,
+      `Config::scripts_dir` and its Working Directories field, `PipelineJob::start` and its bash call
+      site, `UpscaleSettings::to_launch`, and the "Transitional bash dependency" section of CLAUDE.md.
+      Old settings files with `engine` or `paths.scripts_dir` still load. The ignored golden tests
+      keep using a sibling vhs-cli checkout as the reference (`config::vhs_cli_dir`); `check_lock`
+      still recognises a `vhs_upscale*.sh` started from a terminal.
+- [x] **Letterbox detection and crop** (2026-11-14, PR #22). `src/crop.rs`: Detect Letterbox under Edit
+      Master rows, vertical crop only, applied to the native upscale and to Viewer Encode. Tested by Ryan
+      on a letterboxed and a full-frame file: native upscale 1280x552, Viewer Encode 640x276. Later:
+      pillarbox, a crop that changes inside one file, entering a crop by hand, remembering a detection
+      across restarts.
 
 ## Open
 
-- [ ] **5d** After a real tape-length native upscale matches the script: default to native; remove the
-      three `upscale*_script()` accessors, `scripts_dir`, the "Scripts dir" field,
-      `PipelineJob::start` and its bash call site, and the "Transitional bash dependency" section of
-      CLAUDE.md. Needs Ryan to run one.
-- [ ] Anime and B&W native upscale on real material; a worker-level stop-after-segment then resume run.
-- [ ] Letterbox detection and crop (`src/crop.rs`) for Upscale and Viewer Encode: implemented on
-      `feat/letterbox-crop`; needs Ryan's debug test (Detect on a letterboxed EDIT_MASTER, then an
-      upscale and a viewer encode of it; Detect on a full-frame file). Later: pillarbox, a crop that
-      changes inside one file, entering a crop by hand, remembering a detection across restarts.
+- [ ] Anime and B&W native upscale on real material.
 - [ ] GUI test of VDecimate on an `EDIT_MASTER*.mkv`.
 - [ ] Verify the INSTALL.md steps nobody ran: ncnn zip layout, model archive layouts, rebuilding the
       ROCm venv in a scratch location, a fresh VapourSynth install on 26.04 (vsrepo cannot run there:

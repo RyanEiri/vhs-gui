@@ -11,10 +11,9 @@ three sibling projects forked from a former monorepo:
 
 - **`vhs-gui`** (this repo) — the GUI, self-contained.
 - **[`vhs-cli`](https://github.com/RyanEiri/vhs-cli)** — the bash pipeline scripts,
-  for terminal/standalone use. Independent of this repo — no shared code. A handful
-  of not-yet-natively-ported operations in this GUI still shell out to vhs-cli
-  scripts as a transitional measure (see "Transitional bash dependency" below); this
-  is being phased out.
+  for terminal/standalone use. Independent of this repo — no shared code, and the
+  GUI calls none of its scripts. The ignored golden tests compare the native code with
+  the real scripts, so they need a vhs-cli checkout beside this one.
 - **[`plex-reencoder`](https://github.com/RyanEiri/plex-reencoder)** — unrelated
   Plex library tooling, no relationship to this repo.
 
@@ -23,10 +22,9 @@ All three expect to live as siblings under `~/Videos/` (`~/Videos/vhs-gui/`,
 (`captures/`, `logs/`, `vhs_upscale_work/`) that belong to none of them — `src/
 config.rs` references them by absolute path.
 
-**Goal: self-contained.** New pipeline-operation work in this repo should be native
-Rust spawning the underlying tool directly (ffmpeg, `vspipe`, Real-ESRGAN) — never a
-new dependency on a vhs-cli script. Do not add new `Command::new("bash").arg(script)`
-call sites.
+**Self-contained.** Every pipeline operation is native Rust spawning the underlying
+tool directly (ffmpeg, `vspipe`, Real-ESRGAN). Do not add a dependency on a vhs-cli
+script or a `Command::new("bash").arg(script)` call site.
 
 ## Build & Launch
 
@@ -41,7 +39,7 @@ DISPLAY=:0 ./target/debug/vhs-gui
   `ViewMode`, debounced settings persistence. Icon-only left rail switches between
   Monitor and Upscale views; each has its own collapsible settings side panel.
 - **`src/pipeline.rs`** — `PipelineJob`: spawns a job (`start_native_single`, `start_native_pipe`,
-  `start_native_sequence`; only the upscale Script engine still runs `bash <script> <input>`),
+  `start_native_sequence`),
   always with `.process_group(0)` so `killpg()` never reaches vhs-gui itself; tails
   its log for ffmpeg `frame=`/`time=` progress (**time-based progress**, not
   frame-based — robust to fps changes from QTGMC/VDecimate), and exposes
@@ -91,7 +89,7 @@ DISPLAY=:0 ./target/debug/vhs-gui
   dedicated background thread reached via a bounded channel so the UI thread never
   blocks on a slow USB control transfer. This replaced an earlier `v4l2-ctl`
   subprocess-based implementation.
-- **`src/config.rs`** — all hardcoded paths (data dirs, transitional script paths,
+- **`src/config.rs`** — all hardcoded paths (data dirs,
   `upscale_work_root()` on a separate scratch drive).
 - **`src/settings.rs`** / **`src/persist.rs`** — upscale knobs (backend, model,
   scale, CRUSH/BRIGHTNESS presets) and TOML settings persistence. A model with a
@@ -111,8 +109,8 @@ DISPLAY=:0 ./target/debug/vhs-gui
   RAM-backed (`audio_cleanup::unique_work_dir`); every sox step goes through `checked_sox_step` because
   SoX_ng exits 0 after `sox FAIL`. The ignored `matches_the_bash_script`
   test compares against the real script with stub tools; rerun it after changes.
-- **`src/upscale/`** — the native upscale engine (Script/Native setting, default Script; native for all
-  three variants). `plan.rs` is pure: segment math, output size, filter chains, the
+- **`src/upscale/`** — the native upscale engine (all three variants; the bash-script engine and its
+  setting are gone). `plan.rs` is pure: segment math, output size, filter chains, the
   `run_config.txt` fingerprint (byte for byte as the scripts write it) and every command's arguments.
   `engine.rs` runs them (`Binaries` are injected so tests use stubs); a segment is encoded into
   `seg_part/` and renamed into `segments/` only after its frame count checks out. `worker.rs` is
@@ -161,17 +159,6 @@ DISPLAY=:0 ./target/debug/vhs-gui
   closure *before* `mpv_render_context_free`, and mpv can still fire it from a
   decoder thread meanwhile (this segfaulted the app on exit). Keep the no-op
   zero-sized.
-
-## Transitional bash dependency
-
-`src/config.rs` still has the three `upscale*_script()` accessors (plus `scripts_dir`) pointing at
-`~/Videos/vhs-cli/vhs_upscale*.sh`, for the upscale Script engine; they go in phase 5d (see
-ROADMAP.md). Each is marked `// TODO(native-port)`. When porting an operation:
-extend `PipelineJob` with new native-spawn constructors rather than a parallel
-struct (the GUI already renders progress/pause/cancel off `Option<PipelineJob>` —
-keep that surface stable), spawn the underlying tool(s) directly with
-`.process_group(0)` semantics preserved, and remove the corresponding `*_script()`
-accessor once its last caller is gone.
 
 ## Key Design Patterns
 

@@ -37,15 +37,12 @@ day-to-day interface for tape digitization.
 external pipeline scripts. Operations it performs (deinterlace, upscale, denoise,
 etc.) are implemented natively in Rust, spawning only the underlying media tools
 directly (ffmpeg, VapourSynth's `vspipe`, Real-ESRGAN) — never a wrapper script.
-This is a deliberate, ongoing migration (see "Native-Rust port status" below). Only the
-upscale *Script* engine (the default until a real tape-length upscale matches the native one) still
-shells out to scripts from the sibling [vhs-cli](https://github.com/RyanEiri/vhs-cli) repo;
-everything else is native.
+The migration from the original scripts is complete (see "Native-Rust port status" below).
 
 There's also a bash/CLI version of this same pipeline,
 [vhs-cli](https://github.com/RyanEiri/vhs-cli) — useful for terminal/scripted
-workflows. The two are independent sibling projects; this repo has no dependency on
-that one beyond the transitional script paths noted above.
+workflows. The two are independent sibling projects; this repo does not call any of its scripts
+(only the ignored golden tests use a vhs-cli checkout, as the reference to compare against).
 
 **Expected local layout:** this repo lives at `~/Videos/vhs-gui/`, a sibling of the
 data directories (`~/Videos/captures/`, `~/Videos/logs/`, etc.) which are not part of
@@ -140,10 +137,10 @@ sudo install -m 0755 target/release/vhs-gui /usr/local/bin/vhs-gui
 - **Capture length** — the **Cap** field arms a stop timer when a capture starts (it is disabled while capturing); **Stop after** / Set re-arms that timer up or down at any time, so a running capture can be extended as well as shortened. ffmpeg itself runs with a fixed 6 h safety cap as a backstop.
 - **Library panel** — five sections in display order: Viewer → Edit Master (VD) →
   Edit Master → Stabilized → Archival. Click any entry to open it in the player.
-- **Upscale engine** — the upscale settings have an **Engine** choice: *Script* (the original bash
-  scripts, the default) or *Native (beta)*, a built-in engine run as a detached worker so a job still
-  outlives the GUI. Native covers every Upscale button (plain, Anime, B&W).
-  On a test clip it produced output bit-identical to the script's.
+- **Upscale engine** — a built-in engine, run as a detached worker so a job still outlives the GUI,
+  behind every Upscale button (plain, Anime, B&W). It resumes from checkpoints, and a stop or cancel
+  never leaves a partial segment behind. On a test clip it produced output bit-identical to the old
+  script's.
 - **Pipeline actions** — per-section buttons launch Denoise, QTGMC, IVTC, VDecimate,
   Viewer Encode, and all upscale variants as background jobs. Only one job runs at a
   time; buttons are disabled while busy.
@@ -168,12 +165,10 @@ starts and mpv plays the capture's own UDP preview.
 
 ## Native-Rust port status
 
-`vhs-gui` is migrating away from bash pipeline scripts toward being self-contained. Done: the tools
-resolver, embedded VapourSynth scripts, Viewer Encode, Denoise and Denoise+QTGMC, capture and
-monitor, and the upscale engine for all three variants (selectable as *Native (beta)*). Left: making
-native the default and deleting the script call sites (waits on a tape-length upscale that matches
-the script), VapourSynth setup on a fresh machine, and a portable package. `src/config.rs` marks the
-remaining script accessors with `// TODO(native-port)`. The plan and to-do list are in
+`vhs-gui` no longer calls any bash pipeline script. Done: the tools resolver, embedded VapourSynth
+scripts, Viewer Encode, Denoise and Denoise+QTGMC, capture and monitor, the upscale engine for all
+three variants (the only upscale engine since 2026-11-14), and letterbox detection with auto-crop.
+Left: VapourSynth setup on a fresh machine and a portable package. The plan and to-do list are in
 [`ROADMAP.md`](ROADMAP.md).
 
 ## System dependency notes
