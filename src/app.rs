@@ -28,7 +28,6 @@ pub struct App {
     paths_open: bool,
     /// Raw text-field contents for the Working Directories window. Blank
     /// means "no override" — see `AppSettings::capture_from`.
-    paths_scripts_input: String,
     paths_work_root_input: String,
 }
 
@@ -50,7 +49,6 @@ impl App {
         // Restore remaining persisted settings; apply V4L2 preset to hardware on startup.
         saved.apply_to(&mut view_mode, &mut monitor.v4l2, &mut upscale.settings);
 
-        let paths_scripts_input = saved.paths.scripts_dir.clone().unwrap_or_default();
         let paths_work_root_input = saved.paths.work_root.clone().unwrap_or_default();
 
         Ok(Self {
@@ -64,7 +62,6 @@ impl App {
             save_due_at: None,
             about_open: false,
             paths_open: false,
-            paths_scripts_input,
             paths_work_root_input,
         })
     }
@@ -271,12 +268,11 @@ impl App {
     }
 
     /// Videos directory (data root) is deliberately not editable here:
-    /// the vhs-cli scripts that remain (the upscale scripts) hardcode
-    /// $HOME/Videos internally with no env override, so making it
-    /// GUI-editable on the Rust side alone would desync the library view
-    /// from where captures actually land. Scripts dir and work root are
-    /// safe — every consumer reads cfg fresh per action, so a change here
-    /// takes effect on the next button click, no restart needed.
+    /// the vhs-cli scripts hardcode $HOME/Videos with no env override, so
+    /// changing it on the GUI side alone would desync the library view from
+    /// where the scripts put captures. The work root is safe — every consumer
+    /// reads cfg fresh per action, so a change here takes effect on the next
+    /// button click, no restart needed.
     fn show_paths_window(&mut self, ctx: &egui::Context) {
         let mut changed = false;
         egui::Window::new("Working Directories")
@@ -294,14 +290,6 @@ impl App {
                     .num_columns(2)
                     .spacing([10.0, 8.0])
                     .show(ui, |ui| {
-                        ui.label("Scripts dir (vhs-cli):");
-                        changed |= path_field(
-                            ui,
-                            &mut self.paths_scripts_input,
-                            &Config::default_scripts_dir(),
-                        );
-                        ui.end_row();
-
                         ui.label("Upscale work root:");
                         changed |= path_field(
                             ui,
@@ -312,19 +300,13 @@ impl App {
                     });
 
                 ui.add_space(6.0);
-                if ui.button("Reset both to defaults").clicked() {
-                    self.paths_scripts_input.clear();
+                if ui.button("Reset to default").clicked() {
                     self.paths_work_root_input.clear();
                     changed = true;
                 }
             });
 
         if changed {
-            self.cfg.scripts_dir = if self.paths_scripts_input.trim().is_empty() {
-                Config::default_scripts_dir()
-            } else {
-                PathBuf::from(self.paths_scripts_input.trim())
-            };
             self.cfg.work_root = if self.paths_work_root_input.trim().is_empty() {
                 Config::default_work_root()
             } else {
@@ -388,7 +370,6 @@ impl eframe::App for App {
                 &self.view_mode,
                 &self.monitor.v4l2,
                 &self.upscale.settings,
-                &self.paths_scripts_input,
                 &self.paths_work_root_input,
             )
             .save();
