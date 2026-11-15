@@ -860,6 +860,9 @@ impl UpscalePanel {
             self.settings
                 .to_job_spec(variant, &input, &output, &cfg.upscale_work_root());
         spec.crop = crop;
+        if has_square_pixels(&input, cfg) {
+            spec.target_dar.clear();
+        }
         match crate::upscale::start_worker(&spec, label, &cfg.log_dir()) {
             Ok(job) => {
                 let job = job.with_upscale_tracking(seg_dir, output, seg_secs);
@@ -1438,6 +1441,13 @@ fn job_failed(exit_ok: Option<bool>, output_path: &Option<PathBuf>) -> bool {
     exit_failed || output_missing
 }
 
+/// A viewer copy is already scaled to square pixels (Viewer Encode's `setsar=1`), so its picture
+/// shape is its width and height. Forcing the NTSC 4:3 display aspect on it squashed a 640x274
+/// letterboxed copy to 366x274. Masters keep the 4:3, since their 720x480 pixels are not square.
+fn has_square_pixels(input: &std::path::Path, cfg: &Config) -> bool {
+    input.starts_with(cfg.viewer_dir())
+}
+
 fn cleanup_upscale_work_dir(
     output_path: &Option<PathBuf>,
     segments_dir: &Option<PathBuf>,
@@ -1665,5 +1675,25 @@ mod stale_work_dir_tests {
         run(&cfg, Some("realesrgan-x4plus"));
         assert!(work.join("segments/seg_000.mp4").exists());
         let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod square_pixel_tests {
+    #[test]
+    fn only_viewer_copies_are_treated_as_square_pixel() {
+        let cfg = crate::config::Config::default();
+        assert!(super::has_square_pixels(
+            &cfg.viewer_dir().join("EDIT_MASTER-X_VD.viewer.mkv"),
+            &cfg
+        ));
+        assert!(!super::has_square_pixels(
+            &cfg.stabilized_dir().join("EDIT_MASTER-X_VD.mkv"),
+            &cfg
+        ));
+        assert!(!super::has_square_pixels(
+            &cfg.archival_dir().join("VHS_ARCHIVAL_x.mkv"),
+            &cfg
+        ));
     }
 }
