@@ -1,3 +1,4 @@
+pub mod letterbox;
 pub mod monitor;
 pub mod tools;
 pub mod upscale;
