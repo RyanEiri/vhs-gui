@@ -99,6 +99,15 @@ The GUI passes `CRUSH`, `BRIGHTNESS`, `UPSCALE_BACKEND`, `INTERNAL_SCALE`, `FINA
   GUI sends it between segments, as now.
 - Sync fix: `fix_sync` gets a synchronous entry point (its pure parts already exist) for the last step.
 
+### Letterbox crop
+`JobSpec.crop` (from `src/crop.rs`, set by the GUI's Detect Letterbox) is put in front of the pre-filter
+chain (`plan::with_crop`), so frames are cropped before the denoise and the upscaler never sees the
+bars. Because the chain is what the fingerprint records as `PRE_VF`/`BW_FILTER`, a crop adds no new key:
+an uncropped job's fingerprint is byte-identical to the script's, and resuming with a different (or no)
+crop is refused like any other changed setting. The output size comes from the cropped height and keeps
+the source's pixel shape (`plan::output_size` with a crop: 720x276 from a 4:3 720x480 frame at 2x is
+1280x552). The script engine has no crop, so the GUI refuses a cropped job on it.
+
 ### Sub-phases
 - **5a** engine core, worker, standard variant, `.part` handling, settings toggle, golden and
   equivalence tests. Script path stays the default.

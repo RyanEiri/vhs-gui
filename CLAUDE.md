@@ -123,8 +123,15 @@ DISPLAY=:0 ./target/debug/vhs-gui
   programs; the ignored golden test compares the engine with the real script, and
   `tests/upscale_equivalence.rs` (ignored, needs the GPU) compares real outputs. Read
   `docs/upscale-engine-design.md` before changing any of it.
+- **`src/crop.rs`** + **`src/panels/letterbox.rs`** — letterbox detection (Detect Letterbox under Edit
+  Master rows). `CropScan` samples about 30 points with ffmpeg `cropdetect` on a background thread (the
+  `QuietSpotScan` pattern); `decide` crops only when at least 80% of usable samples agree on picture
+  height and top line, and only vertically (dark scenes make the detected width unreliable). Mixed
+  files are reported and left uncropped. The crop goes in front of the upscale pre-filter chain
+  (`JobSpec.crop`, native engine only) and before the Viewer Encode scale. Results are kept in memory,
+  per file.
 - **`src/viewer_encode.rs`** — native port of `vhs_viewer_encode.sh` (Viewer Encode button). `plan` picks
-  the SD/VHS or HD preset from the source height, `ffmpeg_args` builds the argument list as a pure
+  the SD/VHS or HD preset from the source height (`Plan::with_crop` adds a letterbox crop), `ffmpeg_args` builds the argument list as a pure
   function, `launch` returns `Started(job, output)` or `Exists(path)` (an existing viewer copy is never
   overwritten). The ignored `matches_the_bash_script` test runs the real script with stub ffmpeg/ffprobe
   and compares arguments; rerun it after any change here.
