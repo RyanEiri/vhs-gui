@@ -121,6 +121,10 @@ DISPLAY=:0 ./target/debug/vhs-gui
   programs; the ignored golden test compares the engine with the real script, and
   `tests/upscale_equivalence.rs` (ignored, needs the GPU) compares real outputs. Read
   `docs/upscale-engine-design.md` before changing any of it.
+- **`scripts/package-deb.sh`** + **`packaging/`** — builds the `.deb` (release binary, desktop entry, icon,
+  licences, and the three plugin libraries from `scripts/build-vs-plugins.sh` in
+  `/usr/lib/vhs-gui/vs-plugins`). Plugin search order lives in both `assets/vs/vhs_plugins.py`
+  (`_DEFAULT_DIRS`) and `vs_stack::default_plugin_dirs`; a test keeps them in step.
 - **`src/crop.rs`** + **`src/panels/letterbox.rs`** — letterbox detection (Detect Letterbox under Edit
   Master rows). `CropScan` samples about 30 points with ffmpeg `cropdetect` on a background thread (the
   `QuietSpotScan` pattern); `decide` crops only when at least 80% of usable samples agree on picture
