@@ -1,0 +1,28 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: vhs-gui
+Source: https://github.com/RyanEiri/vhs-gui
+
+Files: *
+Copyright: the vhs-gui authors
+License: GPL-3
+ On Debian and Ubuntu systems the full text of the GNU General Public License
+ version 3 is in /usr/share/common-licenses/GPL-3.
+
+Files: usr/lib/vhs-gui/vs-plugins/libffms2.so*
+Copyright: the FFMS2 authors
+License: MIT
+ The FFMS2 source is MIT-licensed. The binary shipped here links the system's FFmpeg
+ libraries, so its terms also depend on how that FFmpeg was built (GPL for Ubuntu's).
+ The notice is in /usr/share/doc/vhs-gui/licenses/ffms2-COPYING.
+
+Files: usr/lib/vhs-gui/vs-plugins/libfmtconv.so
+Copyright: 2004 Sam Hocevar and the fmtconv authors
+License: WTFPL-2
+ The licence text is in /usr/share/doc/vhs-gui/licenses/fmtconv-COPYING.
+
+Files: usr/lib/vhs-gui/vs-plugins/libmiscfilters.so
+Copyright: the VapourSynth MiscFilters authors
+License: LGPL-2.1
+ The licence text is in /usr/share/doc/vhs-gui/licenses/vs-miscfilters-LICENSE.
+ Built with the VapourSynth headers (LGPL-2.1), from the sources pinned in
+ /usr/share/doc/vhs-gui/vs-plugins-REVISIONS.

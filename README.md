@@ -174,6 +174,8 @@ Left: VapourSynth setup on a fresh machine and a portable package. The plan and 
 ## System dependency notes
 
 - **Install steps for every external tool, with what was and was not tested: [`docs/INSTALL.md`](docs/INSTALL.md).**
+- **A `.deb`:** `scripts/package-deb.sh` builds one for the Ubuntu release it runs on (binary, desktop entry, and the
+  `ffms2`, `fmtconv` and `miscfilters` VapourSynth plugins); see section 0 of the install page.
 - Requires the `libmpv2` runtime.
 - System `ffmpeg` 8.0.1 at `/usr/bin/ffmpeg`; SoX for the audio-cleanup chain. Every external
   tool is found through one resolver (`src/tools.rs`): a `VHS_GUI_<TOOL>` environment override

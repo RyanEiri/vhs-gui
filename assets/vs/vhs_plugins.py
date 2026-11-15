@@ -17,6 +17,7 @@ import vapoursynth as vs
 
 _DEFAULT_DIRS = (
     "~/.local/share/vsrepo/plugins",
+    "/usr/lib/vhs-gui/vs-plugins",
     "/usr/lib/x86_64-linux-gnu/vapoursynth",
     "/usr/lib/vapoursynth",
     "/usr/local/lib/vapoursynth",

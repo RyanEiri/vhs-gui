@@ -1,0 +1,20 @@
+Package: vhs-gui
+Version: @VERSION@
+Section: video
+Priority: optional
+Architecture: amd64
+Installed-Size: @SIZE@
+Depends: @DEPENDS@
+Suggests: vapoursynth
+Maintainer: RyanEiri <RyanEiri@users.noreply.github.com>
+Homepage: https://github.com/RyanEiri/vhs-gui
+Description: VHS digitization GUI: capture, deinterlace, upscale and encode
+ A desktop application for the VHS preservation pipeline: live capture
+ monitoring, denoise and audio cleanup, QTGMC deinterlacing, IVTC and
+ VDecimate, letterbox cropping, AI upscaling with resumable segment
+ checkpoints, and viewer encodes.
+ .
+ This package ships the VapourSynth plugins that have no Python wheel
+ (ffms2, fmtconv, miscfilters), built for this Ubuntu release. VapourSynth
+ itself, its other plugins and the Real-ESRGAN upscaler are set up separately
+ (see /usr/share/doc/vhs-gui/external-tools.md).
