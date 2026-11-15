@@ -5,7 +5,7 @@ use crate::library::{FileKind, Library};
 use crate::mpv_view::{MpvView, Source};
 use crate::pipeline::PipelineJob;
 use crate::settings::{
-    Backend, BrightnessPreset, CrushPreset, UpscaleEngine, UpscaleSettings, preset_models_dirs,
+    Backend, BrightnessPreset, CrushPreset, UpscaleSettings, preset_models_dirs,
 };
 use crate::upscale::plan::Variant;
 use crate::vs_ops::VsOp;
@@ -334,26 +334,6 @@ impl UpscalePanel {
                     }
                     ui.end_row();
                 }
-
-                // --- Engine ---
-                ui.label("Engine");
-                ui.horizontal(|ui| {
-                    let prev = self.settings.engine;
-                    ui.radio_value(&mut self.settings.engine, UpscaleEngine::Script, "Script");
-                    ui.radio_value(
-                        &mut self.settings.engine,
-                        UpscaleEngine::Native,
-                        "Native (beta)",
-                    )
-                    .on_hover_text(
-                        "The built-in engine, run as a detached worker. Every Upscale button \
-                             (plain, Anime, B&W) uses it.",
-                    );
-                    if self.settings.engine != prev {
-                        changed = true;
-                    }
-                });
-                ui.end_row();
             });
         changed
     }
@@ -867,13 +847,6 @@ impl UpscalePanel {
         }
 
         let crop = self.letterbox.crop_for(&input);
-        if crop.is_some() && self.settings.engine != UpscaleEngine::Native {
-            *status = "Letterbox crop needs the Native engine: switch Engine to Native, or turn \
-                       the crop off"
-                .into();
-            return;
-        }
-
         // Guaranteed correct regardless of whether the settings panel was
         // open (see sync_scale_to_model's doc comment) — a stale scale here
         // would both upscale at the wrong factor and corrupt the resume
@@ -883,52 +856,17 @@ impl UpscalePanel {
         Self::clear_stale_work_dir(&input, cfg, self.settings.selected_model());
 
         // The native engine, run as a detached worker, for every variant.
-        if self.settings.engine == UpscaleEngine::Native {
-            let mut spec =
-                self.settings
-                    .to_job_spec(variant, &input, &output, &cfg.upscale_work_root());
-            spec.crop = crop;
-            match crate::upscale::start_worker(&spec, label, &cfg.log_dir()) {
-                Ok(job) => {
-                    let job = job.with_upscale_tracking(seg_dir, output, seg_secs);
-                    *status = format!("Started: {} (native engine)", job.label);
-                    if let Some(c) = crop {
-                        *status = format!("{status}, cropped to {}x{}", c.w, c.h);
-                    }
-                    self.last_preview_at = None;
-                    self.last_preview_frames = 0;
-                    self.preview_textures = None;
-                    self.pipeline = Some(job);
-                }
-                Err(e) => *status = format!("Failed to start job: {e}"),
-            }
-            return;
-        }
-
-        let script = match variant {
-            Variant::Standard => cfg.upscale_script(),
-            Variant::Anime => cfg.upscale_anime_script(),
-            Variant::Bw => cfg.upscale_bw_script(),
-        };
-        let (mut owned_envs, owned_args) = self.settings.to_launch(&output);
-        // WORK_ROOT must be passed explicitly: the bash script otherwise
-        // resolves its own default independently of cfg.upscale_work_root(),
-        // which is what Rust uses for segment-checkpoint bookkeeping above —
-        // without this they can silently point at different directories.
-        owned_envs.push((
-            "WORK_ROOT".into(),
-            cfg.upscale_work_root().to_string_lossy().into_owned(),
-        ));
-        let env_refs: Vec<(&str, &str)> = owned_envs
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        let arg_refs: Vec<&str> = owned_args.iter().map(|s| s.as_str()).collect();
-
-        match PipelineJob::start(label, &script, &input, &env_refs, &arg_refs, &cfg.log_dir()) {
+        let mut spec =
+            self.settings
+                .to_job_spec(variant, &input, &output, &cfg.upscale_work_root());
+        spec.crop = crop;
+        match crate::upscale::start_worker(&spec, label, &cfg.log_dir()) {
             Ok(job) => {
                 let job = job.with_upscale_tracking(seg_dir, output, seg_secs);
                 *status = format!("Started: {}", job.label);
+                if let Some(c) = crop {
+                    *status = format!("{status} (cropped to {}x{})", c.w, c.h);
+                }
                 self.last_preview_at = None;
                 self.last_preview_frames = 0;
                 self.preview_textures = None;

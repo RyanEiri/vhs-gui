@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use crate::panels::ViewMode;
 use crate::settings::{
-    Backend, BrightnessPreset, CrushPreset, UpscaleEngine, UpscaleSettings, preset_models_dirs,
+    Backend, BrightnessPreset, CrushPreset, UpscaleSettings, preset_models_dirs,
 };
 use crate::v4l2::V4l2Controls;
 
@@ -27,8 +27,6 @@ pub struct PersistedUpscaleSettings {
     pub segment_secs: u32,
     pub backend: Backend,
     pub batch_size: u32,
-    /// Added later; older settings files lack it and get the default (script).
-    pub engine: UpscaleEngine,
 }
 
 impl Default for PersistedUpscaleSettings {
@@ -48,7 +46,6 @@ impl Default for PersistedUpscaleSettings {
             segment_secs: 30,
             backend: Backend::Rocm,
             batch_size: 2,
-            engine: UpscaleEngine::Script,
         }
     }
 }
@@ -56,17 +53,15 @@ impl Default for PersistedUpscaleSettings {
 // -----------------------------------------------------------------------
 // PersistedPaths — user overrides for working directories, GUI-editable.
 // A blank/absent value means "use the env var / hardcoded default" — see
-// Config::from_paths. videos_dir is intentionally not included here: the vhs-cli
-// scripts that remain (the upscale scripts) hardcode
-// $HOME/Videos internally with no env override, so making it GUI-editable
-// on the Rust side alone would silently desync the GUI's library view from
-// where captures actually land.
+// Config::from_paths. videos_dir is intentionally not included here: the data
+// directories under it are also used by the vhs-cli scripts, which hardcode
+// $HOME/Videos with no env override, so changing it on the GUI side alone would
+// desync the library view from where captures land.
 // -----------------------------------------------------------------------
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct PersistedPaths {
-    pub scripts_dir: Option<String>,
     pub work_root: Option<String>,
 }
 
@@ -136,7 +131,6 @@ impl AppSettings {
         upscale.segment_secs = self.upscale.segment_secs;
         upscale.backend = self.upscale.backend.clone();
         upscale.batch_size = self.upscale.batch_size;
-        upscale.engine = self.upscale.engine;
 
         // Rescan models for the restored directory, then find the saved model by name.
         upscale.rescan();
@@ -149,13 +143,12 @@ impl AppSettings {
     }
 
     /// Snapshot current live state into an AppSettings ready for saving.
-    /// `scripts_dir_input`/`work_root_input` are the raw text-field contents
-    /// from the Working Directories window; blank means "no override" (None).
+    /// `work_root_input` is the raw text-field content from the Working Directories window;
+    /// blank means "no override" (None).
     pub fn capture_from(
         view_mode: &ViewMode,
         v4l2: &V4l2Controls,
         upscale: &UpscaleSettings,
-        scripts_dir_input: &str,
         work_root_input: &str,
     ) -> Self {
         fn non_empty(s: &str) -> Option<String> {
@@ -180,10 +173,8 @@ impl AppSettings {
                 segment_secs: upscale.segment_secs,
                 backend: upscale.backend.clone(),
                 batch_size: upscale.batch_size,
-                engine: upscale.engine,
             },
             paths: PersistedPaths {
-                scripts_dir: non_empty(scripts_dir_input),
                 work_root: non_empty(work_root_input),
             },
         }
@@ -195,20 +186,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_older_settings_file_loads_with_the_script_engine() {
-        // Saved before `engine` existed, and still carrying the removed `denoise` key.
-        let old = "[upscale]\ncrf = 19\ndenoise = true\n";
+    fn settings_files_with_removed_keys_still_load() {
+        // `denoise`, `engine` (the Script/Native choice) and `paths.scripts_dir` were removed;
+        // an older file carrying them must still load, and the rest of it must survive.
+        let old = "[upscale]\ncrf = 19\ndenoise = true\nengine = \"script\"\n\
+                   [paths]\nscripts_dir = \"/tmp/scripts\"\nwork_root = \"/tmp/work\"\n";
         let settings: AppSettings = toml::from_str(old).unwrap();
         assert_eq!(settings.upscale.crf, 19);
-        assert_eq!(settings.upscale.engine, UpscaleEngine::Script);
-        let native = "[upscale]\nengine = \"native\"\n";
-        assert_eq!(
-            toml::from_str::<AppSettings>(native)
-                .unwrap()
-                .upscale
-                .engine,
-            UpscaleEngine::Native
-        );
+        assert_eq!(settings.paths.work_root.as_deref(), Some("/tmp/work"));
     }
 
     #[test]
@@ -216,7 +201,6 @@ mod tests {
         // Simulates a config.toml saved before PersistedPaths existed.
         let old_format = "mode = \"monitor\"\n";
         let settings: AppSettings = toml::from_str(old_format).unwrap();
-        assert!(settings.paths.scripts_dir.is_none());
         assert!(settings.paths.work_root.is_none());
     }
 
@@ -224,14 +208,12 @@ mod tests {
     fn paths_round_trip_through_toml() {
         let settings = AppSettings {
             paths: PersistedPaths {
-                scripts_dir: Some("/tmp/scripts".into()),
                 work_root: Some("/tmp/work".into()),
             },
             ..Default::default()
         };
         let text = toml::to_string_pretty(&settings).unwrap();
         let back: AppSettings = toml::from_str(&text).unwrap();
-        assert_eq!(back.paths.scripts_dir.as_deref(), Some("/tmp/scripts"));
         assert_eq!(back.paths.work_root.as_deref(), Some("/tmp/work"));
     }
 
@@ -239,8 +221,7 @@ mod tests {
     fn capture_from_blank_input_yields_none() {
         let v4l2 = V4l2Controls::new("/dev/video0");
         let upscale = UpscaleSettings::default();
-        let settings = AppSettings::capture_from(&ViewMode::Monitor, &v4l2, &upscale, "  ", "");
-        assert!(settings.paths.scripts_dir.is_none());
+        let settings = AppSettings::capture_from(&ViewMode::Monitor, &v4l2, &upscale, "  ");
         assert!(settings.paths.work_root.is_none());
     }
 }

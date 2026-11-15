@@ -978,14 +978,13 @@ mod golden {
     //! `run_config.txt` are required. Needs the sibling vhs-cli checkout, so it is ignored by
     //! default (`cargo test -- --ignored`).
     use super::*;
-    use crate::config::Config;
     use crate::upscale::testkit::{Kit, StubCfg};
     use std::process::Command;
     use std::time::{Duration, Instant};
 
     /// The script's tool calls and its `run_config.txt`, run with only stubs reachable.
     fn run_script(kit: &Kit, script_name: &str) -> (Vec<(String, Vec<String>)>, String) {
-        let scripts = Config::default().scripts_dir;
+        let scripts = crate::config::vhs_cli_dir();
         let original = fs::read_to_string(scripts.join(script_name)).unwrap();
         // Only the two hard-coded binary paths are replaced; the logic is the real script's.
         let patched = original

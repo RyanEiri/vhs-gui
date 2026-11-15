@@ -1241,14 +1241,12 @@ mod tests {
     #[test]
     #[ignore]
     fn matches_the_bash_script() {
-        let base = cfg();
-        let script = base.scripts_dir.join("vhs_capture_ffmpeg.sh");
+        let script = crate::config::vhs_cli_dir().join("vhs_capture_ffmpeg.sh");
         assert!(script.is_file(), "script missing: {}", script.display());
 
         for slot in ["archival", "viewer"] {
-            let env_src = base
-                .scripts_dir
-                .join(format!("vhs-env/{slot}/ffmpeg/capture.env"));
+            let env_src =
+                crate::config::vhs_cli_dir().join(format!("vhs-env/{slot}/ffmpeg/capture.env"));
             let home = TempDir::new(&format!("capture-golden-{slot}"));
             let slot_dir = home.0.join("Videos/ffmpeg-current");
             fs::create_dir_all(&slot_dir).unwrap();

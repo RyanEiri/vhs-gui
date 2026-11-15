@@ -562,7 +562,7 @@ mod tests {
     #[test]
     #[ignore]
     fn matches_the_bash_script() {
-        let script = Config::default().scripts_dir.join("vhs_viewer_encode.sh");
+        let script = crate::config::vhs_cli_dir().join("vhs_viewer_encode.sh");
         assert!(script.is_file(), "script missing: {}", script.display());
 
         let guard = TempDir::new("vhs-gui-viewer");
