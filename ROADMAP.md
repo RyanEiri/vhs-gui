@@ -116,9 +116,15 @@ not installed; `dpkg-deb`, `fakeroot`, `lintian` are.
 
 Recommended shape, replacing the earlier "two packages" idea:
 
-- [ ] One `.deb` built in a clean 24.04 container (check it runs on 26.04 here; otherwise one per
-      series): binary, desktop entry, icon, licences, and `ffms2`/`fmtconv`/`miscfilters` built from
-      pinned source in the container. `Depends: libmpv2, ffmpeg, sox`.
+- [x] **6b, the `.deb`** (2026-11-15). `scripts/package-deb.sh` builds `dist/vhs-gui_<ver>-1_amd64.deb`
+      for the release it runs on (26.04 here; the plugins link the distro's FFmpeg, so one package
+      per release): binary, desktop entry, icon, copyright and the three plugin licences, and
+      `ffms2`/`fmtconv`/`miscfilters` in `/usr/lib/vhs-gui/vs-plugins`, which the embedded scripts and
+      `vs_stack` search after the user's own plugin folder. `Depends` come from `dpkg-shlibdeps` plus
+      `ffmpeg, sox`. `lintian` shows two warnings (no man page, changelog wording). Unpacked and
+      checked: layout, library resolution, plugins loading under R81 through `vhs_plugins.load`.
+      Not done: installing it with `apt` (Ryan), a 24.04 build. ffms2's licence is confirmed: MIT
+      source, with binaries that follow how FFmpeg was built.
 - [ ] A user-started "Set up VapourSynth" step in the Tools window: a private venv under
       `~/.local/share/vhs-gui/` with R81 (or R82 after a test), the three API 4 plugin wheels,
       `havsfunc` and `vsutil`; first-run `vapoursynth config` (writes

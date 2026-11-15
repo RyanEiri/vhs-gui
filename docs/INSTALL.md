@@ -10,6 +10,7 @@ need the same programs with different install commands.
 
 | Needed for | Program | Section |
 |---|---|---|
+| ffmpeg, sox, libmpv and three VapourSynth plugins in one step | the vhs-gui `.deb` | [0](#0-the-deb-package-optional) |
 | everything | ffmpeg, ffprobe | [1](#1-system-packages) |
 | audio cleanup | sox | [1](#1-system-packages) |
 | live preview | libmpv | [1](#1-system-packages) |
@@ -17,6 +18,27 @@ need the same programs with different install commands.
 | AI upscale (Vulkan) | realesrgan-ncnn-vulkan | [3](#3-real-esrgan-vulkan-ncnn) |
 | AI upscale (ROCm, community VHS models) | PyTorch + ROCm driver | [4](#4-real-esrgan-rocm-pytorch) |
 | both upscalers | model weights | [5](#5-model-weights) |
+
+## 0. The .deb package (optional)
+
+`scripts/package-deb.sh` builds `dist/vhs-gui_<version>-1_amd64.deb` for the Ubuntu release it runs
+on: the release binary, desktop entry and icon, and the three VapourSynth plugins that have no
+Python wheel (`ffms2`, `fmtconv`, `miscfilters`), built from pinned source in a container
+(`scripts/build-vs-plugins.sh`, which needs docker). The plugins link the distro's FFmpeg libraries,
+so a package only works on the release it was built for. Install it with
+`sudo apt install ./dist/vhs-gui_*.deb`; it depends on `ffmpeg`, `sox`, `libmpv2` and the libraries
+the plugins link, so section 1 is done for you.
+
+It does **not** contain VapourSynth, its other plugins (`mvtools`, `znedi3`, `vivtc`), `havsfunc`,
+`vsutil`, Real-ESRGAN or any model: sections 2 to 5 still apply. The plugins land in
+`/usr/lib/vhs-gui/vs-plugins`, which the embedded scripts and the Tools window search after your
+own `~/.local/share/vsrepo/plugins`, so a copy you installed yourself wins. A hand-installed
+`/usr/local/bin/vhs-gui` comes first on `PATH`; remove it, and the old `~/.local/share/applications`
+entry, once the package is in.
+
+*Tested:* the package builds, `lintian` and `dpkg-deb` accept it, the files unpack to the right
+places, the binary's libraries resolve and the plugins load from the unpacked directory under R81.
+*Not tested:* installing it with `apt`, and building for 24.04.
 
 ## 1. System packages
 
