@@ -122,9 +122,9 @@ fn default_plugin_dirs(home: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
 /// Where the `.deb` installs the plugins that have no wheel (see `scripts/package-deb.sh`).
 const PACKAGED_PLUGIN_DIR: &str = "/usr/lib/vhs-gui/vs-plugins";
 
-/// The plugin folders of a pip-installed (R81) VapourSynth that `vspipe` belongs to: a wheel's
-/// `vspipe` sits in `<prefix>/bin`, its plugins in `<prefix>/lib/python*/site-packages/vapoursynth/plugins`.
-fn own_plugin_dirs(vspipe: &Path) -> Vec<PathBuf> {
+/// The `site-packages` folders of the pip environment `vspipe` belongs to: a wheel's `vspipe` sits
+/// in `<prefix>/bin`, its Python packages in `<prefix>/lib/python*/site-packages`.
+fn own_site_packages(vspipe: &Path) -> Vec<PathBuf> {
     let Some(prefix) = vspipe.parent().and_then(Path::parent) else {
         return Vec::new();
     };
@@ -134,11 +134,21 @@ fn own_plugin_dirs(vspipe: &Path) -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = entries
         .filter_map(Result::ok)
         .filter(|e| e.file_name().to_string_lossy().starts_with("python"))
-        .map(|e| e.path().join("site-packages/vapoursynth/plugins"))
+        .map(|e| e.path().join("site-packages"))
         .filter(|p| p.is_dir())
         .collect();
     found.sort();
     found
+}
+
+/// The plugin folders of a pip-installed (R81) VapourSynth that `vspipe` belongs to
+/// (`<site-packages>/vapoursynth/plugins`).
+fn own_plugin_dirs(vspipe: &Path) -> Vec<PathBuf> {
+    own_site_packages(vspipe)
+        .into_iter()
+        .map(|d| d.join("vapoursynth/plugins"))
+        .filter(|p| p.is_dir())
+        .collect()
 }
 
 pub fn module_dirs_from_env() -> Vec<PathBuf> {
@@ -148,6 +158,10 @@ pub fn module_dirs_from_env() -> Vec<PathBuf> {
     }
     if let Some(p) = std::env::var_os("PYTHONPATH") {
         dirs.extend(std::env::split_paths(&p).filter(|p| !p.as_os_str().is_empty()));
+    }
+    // The modules `vs_setup` installs sit beside the environment's own `vspipe`.
+    if let Some(vspipe) = crate::tools::resolve(crate::tools::Tool::Vspipe) {
+        dirs.extend(own_site_packages(&vspipe));
     }
     dirs
 }

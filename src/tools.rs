@@ -95,6 +95,9 @@ impl Tool {
 #[derive(Clone, Debug, Default)]
 pub struct SearchPath {
     pub override_path: Option<PathBuf>,
+    /// vhs-gui's own environment (the VapourSynth that "Set up VapourSynth" installs). Ahead of
+    /// the system directories: once the user has set it up, it is the one they asked for.
+    pub private: Vec<PathBuf>,
     pub bundled: Vec<PathBuf>,
     pub system: Vec<PathBuf>,
     pub path: Vec<PathBuf>,
@@ -105,6 +108,12 @@ impl SearchPath {
         let override_path = std::env::var_os(tool.env_override())
             .filter(|v| !v.is_empty())
             .map(PathBuf::from);
+
+        let private = if tool == Tool::Vspipe {
+            vec![crate::vs_setup::venv_dir().join("bin")]
+        } else {
+            Vec::new()
+        };
 
         let mut bundled = Vec::new();
         if let Some(appdir) = std::env::var_os("APPDIR").filter(|v| !v.is_empty()) {
@@ -127,6 +136,7 @@ impl SearchPath {
 
         Self {
             override_path,
+            private,
             bundled,
             system: vec![PathBuf::from("/usr/bin")],
             path,
@@ -148,8 +158,9 @@ pub fn resolve_in(tool: Tool, search: &SearchPath) -> Option<PathBuf> {
         return is_executable(o).then(|| o.clone());
     }
     search
-        .bundled
+        .private
         .iter()
+        .chain(&search.bundled)
         .chain(&search.system)
         .chain(&search.path)
         .map(|dir| dir.join(tool.binary()))
@@ -292,6 +303,7 @@ mod tests {
     fn search(s: &Scratch) -> SearchPath {
         SearchPath {
             override_path: None,
+            private: vec![s.dir("private")],
             bundled: vec![s.dir("bundled")],
             system: vec![s.dir("system")],
             path: vec![s.dir("home-bin"), s.dir("path")],
@@ -321,6 +333,19 @@ mod tests {
             resolve_in(Tool::RealesrganRocm, &search(&s)),
             Some(home_hit)
         );
+    }
+
+    #[test]
+    fn the_private_environment_beats_the_system_directories() {
+        let s = Scratch::new("private");
+        s.file("system", "vspipe", 0o755);
+        s.file("path", "vspipe", 0o755);
+        let mine = s.file("private", "vspipe", 0o755);
+        assert_eq!(resolve_in(Tool::Vspipe, &search(&s)), Some(mine));
+        // Without it, the system one is used as before.
+        let s2 = Scratch::new("no-private");
+        let sys = s2.file("system", "vspipe", 0o755);
+        assert_eq!(resolve_in(Tool::Vspipe, &search(&s2)), Some(sys));
     }
 
     #[test]

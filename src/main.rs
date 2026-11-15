@@ -19,6 +19,7 @@ mod v4l2;
 mod viewer_encode;
 mod vs_assets;
 mod vs_ops;
+mod vs_setup;
 mod vs_stack;
 
 /// Decode the embedded icon PNG and return `egui::IconData`.
