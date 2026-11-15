@@ -79,6 +79,9 @@ struct Ctx {
     total: u64,
     count: u64,
     filter: String,
+    /// Timestamp of the source's first frame, and the container's start offset.
+    origin: f64,
+    start_time: f64,
 }
 
 struct Validation {
@@ -282,6 +285,15 @@ impl<'a> Engine<'a> {
             .map(|f| plan::with_crop(&f, spec.crop.as_ref()))
             .map_err(|e| anyhow!(e))?;
         let total = plan::total_seconds(duration);
+        // Where the source's timeline starts; both are 0 when the probe cannot say.
+        let origin = self
+            .probe(&plan::probe_first_pts_args(input))
+            .and_then(|t| plan::first_pts(&t))
+            .unwrap_or(0.0);
+        let start_time = self
+            .probe(&plan::probe_start_time_args(input))
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(0.0);
         Ok(Ctx {
             duration,
             duration_text,
@@ -290,6 +302,8 @@ impl<'a> Engine<'a> {
             total,
             count: plan::segment_count(total, spec.segment_secs),
             filter,
+            origin,
+            start_time,
         })
     }
 
@@ -398,7 +412,9 @@ impl<'a> Engine<'a> {
             } else {
                 println!("  -> Extracting frames (video only)...");
             }
-            self.ffmpeg(&plan::extract_args(self.spec, l, start, len, &ctx.filter))?;
+            let window =
+                plan::segment_window(i, self.spec.segment_secs, ctx.origin, ctx.start_time);
+            self.ffmpeg(&plan::extract_args(self.spec, l, &window, &ctx.filter))?;
 
             if Self::count_frames(&l.frames_dir) == 0 {
                 eprintln!("  -> No frames extracted for this segment; stopping.");
@@ -674,7 +690,13 @@ mod tests {
             })
             .collect();
         assert_eq!(extracts.len(), 3);
-        assert_eq!(&extracts[2][2..5], ["60", "-t", "10"]);
+        // Segment 2 takes the frames from 60 s on (every boundary is half a millisecond early).
+        let vf = extracts[2][extracts[2].iter().position(|a| a == "-vf").unwrap() + 1].clone();
+        assert!(
+            vf.starts_with("select='gte(t,59.999500)*lt(t,89.999500)'"),
+            "{vf}"
+        );
+        assert!(extracts[2].contains(&"passthrough".to_string()));
         assert_eq!(kit.calls_of("upscaler").len(), 3);
     }
 
@@ -689,6 +711,7 @@ mod tests {
         });
         assert_eq!(run(&kit).unwrap(), Outcome::Done);
         let filter = "crop=720:276:0:98,hqdn3d=3:2:4:3";
+        let extract_filter = format!("select='gte(t,-0.000500)*lt(t,29.999500)',{filter}");
 
         let calls = kit.calls_of("ffmpeg");
         let vf_of = |a: &Vec<String>| {
@@ -699,7 +722,7 @@ mod tests {
             .iter()
             .find(|a| a.get(1).map(String::as_str) == Some("-ss"))
             .expect("an extract call");
-        assert_eq!(vf_of(extract), filter);
+        assert_eq!(vf_of(extract), extract_filter);
         // 720x276 from a 4:3 720x480 frame at 2x is 1280x552.
         let rebuild = calls
             .iter()
@@ -1060,23 +1083,57 @@ mod golden {
         let _ = fs::remove_file(kit.state.join("cur_len"));
     }
 
-    /// The scripts have no staging directory: the engine encodes into `seg_part/` and renames. That
-    /// is the one deliberate difference, so it is normalized away before comparing.
+    /// Deliberate differences from the scripts, normalized away before comparing: the engine encodes
+    /// into `seg_part/` and renames (the scripts have no staging directory), and it picks each
+    /// segment's frames by timestamp (`-copyts`, a `select` window and `-fps_mode passthrough`
+    /// instead of `-ss`/`-t`, which repeated a frame at every boundary on some sources) after two
+    /// extra probes for the timeline. For the extraction call only the input, the filters after the
+    /// `select`, the JPEG quality and the output directory are compared.
     fn normalize(calls: Vec<(String, Vec<String>)>) -> Vec<(String, Vec<String>)> {
+        let value_after = |a: &[String], flag: &str| {
+            a.iter()
+                .position(|x| x == flag)
+                .and_then(|i| a.get(i + 1))
+                .cloned()
+                .unwrap_or_default()
+        };
         calls
             .into_iter()
+            .filter(|(t, a)| {
+                !(t == "ffprobe"
+                    && a.iter()
+                        .any(|x| x.contains("packet=pts_time") || x.contains("format=start_time")))
+            })
             .map(|(t, a)| {
                 let t = if t.starts_with("realesrgan") {
                     "upscaler".to_string()
                 } else {
                     t
                 };
-                (
-                    t,
-                    a.into_iter()
-                        .map(|x| x.replace("/seg_part/", "/segments/"))
-                        .collect(),
-                )
+                let a: Vec<String> = a
+                    .into_iter()
+                    .map(|x| x.replace("/seg_part/", "/segments/"))
+                    .collect();
+                if t == "ffmpeg" && a.last().is_some_and(|l| l.ends_with("frame_%08d.jpg")) {
+                    let vf = value_after(&a, "-vf");
+                    let vf = match vf.strip_prefix("select=") {
+                        Some(rest) => rest
+                            .split_once(")'")
+                            .map(|(_, r)| r.trim_start_matches(',').to_string())
+                            .unwrap_or_default(),
+                        None => vf,
+                    };
+                    return (
+                        t,
+                        vec![
+                            value_after(&a, "-i"),
+                            vf,
+                            value_after(&a, "-qscale:v"),
+                            a.last().cloned().unwrap_or_default(),
+                        ],
+                    );
+                }
+                (t, a)
             })
             .collect()
     }
@@ -1091,6 +1148,7 @@ mod golden {
         let mut kit = Kit::new(name, variant, &cfg);
         tweak(&mut kit.spec);
         let (script_calls, script_config) = run_script(&kit, script);
+        let script_calls = normalize(script_calls);
         reset(&kit);
 
         let cancel = AtomicBool::new(false);
