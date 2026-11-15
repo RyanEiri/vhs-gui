@@ -92,23 +92,35 @@ pub fn plugin_dirs_from_env() -> Vec<PathBuf> {
             .filter(|p| !p.as_os_str().is_empty())
             .collect();
     }
+    let mut dirs = default_plugin_dirs(std::env::var_os("HOME").as_deref());
+    if let Some(vspipe) = crate::tools::resolve(crate::tools::Tool::Vspipe) {
+        dirs.extend(own_plugin_dirs(&vspipe));
+    }
+    dirs
+}
+
+/// The fixed plugin folders, in search order: the user's own copies first, then the ones the vhs-gui
+/// package ships (`ffms2`, `fmtconv`, `miscfilters`), then the system VapourSynth's. Mirrors
+/// `_DEFAULT_DIRS` in `assets/vs/vhs_plugins.py`.
+fn default_plugin_dirs(home: Option<&std::ffi::OsStr>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(home) = std::env::var_os("HOME") {
-        dirs.push(Path::new(&home).join(".local/share/vsrepo/plugins"));
+    if let Some(home) = home {
+        dirs.push(Path::new(home).join(".local/share/vsrepo/plugins"));
     }
     dirs.extend(
         [
+            PACKAGED_PLUGIN_DIR,
             "/usr/lib/x86_64-linux-gnu/vapoursynth",
             "/usr/lib/vapoursynth",
             "/usr/local/lib/vapoursynth",
         ]
         .map(PathBuf::from),
     );
-    if let Some(vspipe) = crate::tools::resolve(crate::tools::Tool::Vspipe) {
-        dirs.extend(own_plugin_dirs(&vspipe));
-    }
     dirs
 }
+
+/// Where the `.deb` installs the plugins that have no wheel (see `scripts/package-deb.sh`).
+const PACKAGED_PLUGIN_DIR: &str = "/usr/lib/vhs-gui/vs-plugins";
 
 /// The plugin folders of a pip-installed (R81) VapourSynth that `vspipe` belongs to: a wheel's
 /// `vspipe` sits in `<prefix>/bin`, its plugins in `<prefix>/lib/python*/site-packages/vapoursynth/plugins`.
@@ -208,6 +220,23 @@ pub fn problems(status: &[StackStatus]) -> Vec<String> {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn the_default_plugin_dirs_put_the_users_copies_before_the_packages() {
+        let dirs = default_plugin_dirs(Some(std::ffi::OsStr::new("/home/x")));
+        let pos = |s: &str| dirs.iter().position(|d| d == Path::new(s)).unwrap();
+        assert_eq!(dirs[0], Path::new("/home/x/.local/share/vsrepo/plugins"));
+        assert!(pos(PACKAGED_PLUGIN_DIR) < pos("/usr/lib/vapoursynth"));
+        assert_eq!(default_plugin_dirs(None)[0], Path::new(PACKAGED_PLUGIN_DIR));
+    }
+
+    /// `vhs_plugins.py` must search the same packaged folder, or the Tools window would report
+    /// plugins as present that the scripts cannot load.
+    #[test]
+    fn the_python_loader_searches_the_packaged_plugin_dir_too() {
+        let py = include_str!("../assets/vs/vhs_plugins.py");
+        assert!(py.contains(&format!("\"{PACKAGED_PLUGIN_DIR}\"")));
+    }
 
     struct Scratch(PathBuf);
 
