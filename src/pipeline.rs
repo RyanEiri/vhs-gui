@@ -206,10 +206,10 @@ impl SeqCtx {
     }
 }
 
-/// Both engines write their own pgid here at startup and remove it at exit: `vhs_upscale*.sh` via
-/// `trap ... EXIT`, the native worker via a guard. Used to detect a job still running from a
-/// previous vhs-gui process (see module-level doc on `on_exit` for why a job can outlive the GUI
-/// that started it), whichever engine launched it.
+/// The native worker writes its pgid here at startup and removes it at exit (via a guard); the
+/// vhs-cli `vhs_upscale*.sh` scripts write and remove the same file, so an upscale started from a
+/// terminal is recognised too. Used to detect a job still running from a previous vhs-gui process
+/// (see module-level doc on `on_exit` for why a job can outlive the GUI that started it).
 fn lock_path(work_dir: &Path) -> PathBuf {
     work_dir.join("upscale.pgid")
 }
@@ -367,50 +367,6 @@ fn base_job(prep: SpawnPrep, child: Child, aux_child: Option<Child>, pgid: Pid) 
 }
 
 impl PipelineJob {
-    /// Spawn a pipeline script.
-    ///
-    /// * `label`   – display name for the UI
-    /// * `script`  – path to the bash script
-    /// * `input`   – path passed as `$1` to the script
-    /// * `envs`    – extra environment variables (e.g. `&[("NO_LAUNCH", "1")]`)
-    /// * `log_dir` – `~/Videos/logs/` — where scripts write their own progress logs
-    pub fn start(
-        label: impl Into<String>,
-        script: &Path,
-        input: &Path,
-        envs: &[(&str, &str)],
-        extra_args: &[&str],
-        log_dir: &Path,
-    ) -> anyhow::Result<Self> {
-        use std::os::unix::process::CommandExt as _;
-
-        let prep = prepare_spawn(label, input, log_dir)?;
-        // Clone handle so both stdout and stderr land in the same log file.
-        // This captures script-level error messages (which often go to stdout)
-        // as well as ffmpeg progress lines (which go to stderr).
-        let log_file_out = prep.log_file.try_clone()?;
-
-        let mut cmd = Command::new("bash");
-        cmd.arg(script).arg(input);
-        for a in extra_args {
-            cmd.arg(a);
-        }
-        cmd.stdin(Stdio::null())
-            // Both stdout and stderr go to the log so we see all script output.
-            .stdout(Stdio::from(log_file_out))
-            .stderr(Stdio::from(prep.log_file.try_clone()?))
-            .env("PATH", &prep.full_path)
-            .process_group(0); // own PGID so killpg() doesn't reach vhs-gui
-
-        for (k, v) in envs {
-            cmd.env(k, v);
-        }
-
-        let child = cmd.spawn()?;
-        let pgid = Pid::from_raw(child.id() as i32);
-        Ok(base_job(prep, child, None, pgid))
-    }
-
     /// Spawn a native two-process pipe: `producer | consumer` (e.g. `vspipe |
     /// ffmpeg`). `producer`/`consumer` must already have their args/env set;
     /// this function wires stdio (piped stdout -> stdin), the shared process
