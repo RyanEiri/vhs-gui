@@ -49,28 +49,51 @@ def _already_provided(filename):
     return any(hasattr(vs.core, ns) for ns in _PROVIDED_BY.get(filename, ()))
 
 
-class _ZnediCore:
-    """`vs.core` with `core.nnedi3` answered by `core.znedi3` (same filter, same arguments)."""
+class _Unavailable:
+    """Stands in for a plugin namespace that is not installed: looking a function up works, calling
+    it says which plugin is missing. havsfunc builds `partial(core.eedi3m.EEDI3, ...)` for every
+    QTGMC call but only calls it for the EEDI3 modes, which these scripts never use."""
+
+    def __init__(self, namespace):
+        self._namespace = namespace
+
+    def __getattr__(self, name):
+        namespace = self._namespace
+
+        def missing(*args, **kwargs):
+            raise vs.Error(f"{namespace}.{name} needs the {namespace} plugin, which is not installed")
+
+        return missing
+
+
+class _AdaptedCore:
+    """`vs.core` as the pinned havsfunc expects it: `core.nnedi3` answered by `core.znedi3` when only
+    znedi3 exists (same filter, same arguments), and `core.eedi3m` answered by [`_Unavailable`] when
+    it is not installed."""
 
     def __init__(self, core):
         object.__setattr__(self, "_core", core)
 
     def __getattr__(self, name):
-        return getattr(self._core, "znedi3" if name == "nnedi3" else name)
+        core = self._core
+        if name == "nnedi3" and not hasattr(core, "nnedi3") and hasattr(core, "znedi3"):
+            return core.znedi3
+        if name == "eedi3m" and not hasattr(core, "eedi3m"):
+            return _Unavailable(name)
+        return getattr(core, name)
 
     def __setattr__(self, name, value):
         setattr(self._core, name, value)
 
 
 def prepare_havsfunc(module):
-    """Make an imported havsfunc work on a core that has znedi3 but no nnedi3 (R81).
+    """Make an imported havsfunc work on this core.
 
-    R81 cannot load the API 3 nnedi3 plugin and ships znedi3 instead, but havsfunc calls
-    `core.nnedi3.nnedi3`. havsfunc looks up its module-level `core` at call time, so replacing it is
-    enough, and the unmodified upstream havsfunc stays usable. Does nothing when nnedi3 is present.
+    R81 cannot load the API 3 nnedi3 plugin and ships znedi3 instead, and upstream havsfunc looks up
+    `core.eedi3m` even when no EEDI3 mode is used. havsfunc looks up its module-level `core` at call
+    time, so replacing it is enough and the unmodified upstream file stays usable.
     """
-    if not hasattr(vs.core, "nnedi3") and hasattr(vs.core, "znedi3"):
-        module.core = _ZnediCore(vs.core)
+    module.core = _AdaptedCore(vs.core)
     return module
 
 

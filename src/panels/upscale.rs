@@ -36,6 +36,8 @@ pub struct UpscalePanel {
     quiet_spot_scan: Option<(PathBuf, crate::audio_cleanup::QuietSpotScan)>,
     /// Letterbox detection results, applied by the Upscale and Viewer Encode buttons.
     letterbox: super::letterbox::Letterbox,
+    /// A "Set up VapourSynth" job just ended (successfully or not); the app rechecks the tools.
+    vs_setup_finished: bool,
     last_preview_at: Option<std::time::Instant>,
     last_preview_frames: u64,
     preview_textures: Option<UpscalePreviewTextures>,
@@ -56,6 +58,7 @@ impl UpscalePanel {
             audio_cleanup_state: None,
             quiet_spot_scan: None,
             letterbox: Default::default(),
+            vs_setup_finished: false,
             last_preview_at: None,
             last_preview_frames: 0,
             preview_textures: None,
@@ -342,6 +345,30 @@ impl UpscalePanel {
         self.library.refresh(cfg);
     }
 
+    /// Start the private VapourSynth setup (Tools window button), unless a job is already running.
+    pub fn launch_vs_setup(&mut self, cfg: &Config, status: &mut String) {
+        if self.pipeline.is_some() {
+            *status = "Another job is running; set up VapourSynth when it finishes".into();
+            return;
+        }
+        match crate::vs_setup::launch(cfg, crate::vs_setup::LABEL.into()) {
+            Ok(job) => {
+                *status = format!(
+                    "Started: {} (log in {})",
+                    job.label,
+                    cfg.log_dir().display()
+                );
+                self.pipeline = Some(job);
+            }
+            Err(e) => *status = format!("Could not start the VapourSynth setup: {e}"),
+        }
+    }
+
+    /// True once after a VapourSynth setup job has ended.
+    pub fn take_vs_setup_finished(&mut self) -> bool {
+        std::mem::take(&mut self.vs_setup_finished)
+    }
+
     pub fn is_upscaling(&self) -> bool {
         self.pipeline
             .as_ref()
@@ -507,6 +534,9 @@ impl UpscalePanel {
             // resets the index — otherwise the action panel (and its Rename
             // button) vanishes and the user has to re-click the row.
             let reselect_path = job.output_path.clone();
+            if job.label == crate::vs_setup::LABEL {
+                self.vs_setup_finished = true;
+            }
             let failed = job_failed(job.exit_ok, &job.output_path);
             let chained = self.chain_after.take();
             let finish_status = if failed {

@@ -76,8 +76,10 @@ impl ToolsPanel {
         out
     }
 
-    pub fn show_window(&mut self, ctx: &egui::Context) {
+    /// Draw the window. Returns true when the user asked to set up VapourSynth.
+    pub fn show_window(&mut self, ctx: &egui::Context) -> bool {
         let mut recheck = false;
+        let mut setup = false;
         let checking = self.checking();
         egui::Window::new("Tools")
             .open(&mut self.open)
@@ -159,14 +161,30 @@ impl ToolsPanel {
                     .small()
                     .weak(),
                 );
-                ui.add_enabled_ui(!checking, |ui| {
-                    if ui.button("Recheck").clicked() {
-                        recheck = true;
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(!checking, |ui| {
+                        if ui.button("Recheck").clicked() {
+                            recheck = true;
+                        }
+                    });
+                    if ui
+                        .button("Set up VapourSynth…")
+                        .on_hover_text(
+                            "Creates a private Python environment in ~/.local/share/vhs-gui/vapoursynth \
+                             with VapourSynth R81, the mvtools, znedi3 and vivtc plugins, havsfunc and \
+                             vsutil (about 25 MB from PyPI, pinned by hash). Needs python3-venv and a \
+                             network connection. Once it exists vhs-gui uses it instead of the system \
+                             VapourSynth; delete the folder to go back.",
+                        )
+                        .clicked()
+                    {
+                        setup = true;
                     }
                 });
             });
         if recheck {
             self.recheck(ctx);
         }
+        setup
     }
 }

@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 /// `(file name, contents)`. `vhs_plugins.py` is imported by the scripts, so the directory has
 /// to be on `PYTHONPATH` (see `vs_ops::build_vspipe`).
-pub const FILES: [(&str, &str); 6] = [
+pub const FILES: [(&str, &str); 7] = [
     ("qtgmc.vpy", include_str!("../assets/vs/qtgmc.vpy")),
     ("ivtc.vpy", include_str!("../assets/vs/ivtc.vpy")),
     (
@@ -32,6 +32,11 @@ pub const FILES: [(&str, &str); 6] = [
     (
         "vhs_plugins.py",
         include_str!("../assets/vs/vhs_plugins.py"),
+    ),
+    // Not a script: the pinned wheels `vs_setup` installs, kept here so pip gets a real file.
+    (
+        "requirements.txt",
+        include_str!("../assets/vs/requirements.txt"),
     ),
 ];
 
@@ -264,22 +269,24 @@ mod tests {
 
     #[test]
     fn the_core_s_own_plugin_folder_is_searched_when_it_has_one() {
+        // A name no real plugin has: this test must not depend on what is installed on the host
+        // (the vhs-gui package puts libffms2.so in /usr/lib/vhs-gui/vs-plugins).
         let own = scratch("own");
         fs::create_dir_all(&own).unwrap();
-        fs::write(own.join("libffms2.so"), b"").unwrap();
+        fs::write(own.join("libvhsguitest.so"), b"").unwrap();
         let with = run_loader(
             "with-own",
             &[],
             Some(&own),
-            "print(vhs_plugins.load('libffms2.so'))",
+            "print(vhs_plugins.load('libvhsguitest.so'))",
         );
-        assert_eq!(with, own.join("libffms2.so").display().to_string());
+        assert_eq!(with, own.join("libvhsguitest.so").display().to_string());
         // R55 has no get_plugin_dir: the same file is then not found.
         let without = run_loader(
             "without-own",
             &[],
             None,
-            "try:\n    vhs_plugins.load('libffms2.so')\nexcept FileNotFoundError:\n    print('missing')",
+            "try:\n    vhs_plugins.load('libvhsguitest.so')\nexcept FileNotFoundError:\n    print('missing')",
         );
         assert_eq!(without, "missing");
         let _ = fs::remove_dir_all(&own);
@@ -311,12 +318,43 @@ mod tests {
     }
 
     #[test]
-    fn havsfunc_is_left_alone_when_nnedi3_is_present_or_nothing_replaces_it() {
-        for (name, namespaces) in [("both", &["nnedi3", "znedi3"][..]), ("none", &[][..])] {
-            let body = format!(
-                "{FAKE_HAVSFUNC}vhs_plugins.prepare_havsfunc(haf)\nprint(haf.core is original)"
-            );
-            assert_eq!(run_loader(name, namespaces, None, &body), "True", "{name}");
-        }
+    fn nnedi3_is_not_remapped_when_it_is_present_or_znedi3_is_absent() {
+        // Present: passed through untouched.
+        let body = format!(
+            "{FAKE_HAVSFUNC}vhs_plugins.prepare_havsfunc(haf)\nprint(haf.core.nnedi3 is vs.core.nnedi3)"
+        );
+        let out = run_loader("both", &["nnedi3", "znedi3"], None, &body);
+        assert_eq!(out, "True");
+        // Neither exists: the lookup fails as it always did, not silently.
+        let body = format!(
+            "{FAKE_HAVSFUNC}vhs_plugins.prepare_havsfunc(haf)\n\
+             try:\n    haf.core.nnedi3\nexcept AttributeError:\n    print('missing')"
+        );
+        assert_eq!(run_loader("none", &[], None, &body), "missing");
+    }
+
+    #[test]
+    fn a_missing_eedi3m_is_a_stand_in_that_only_fails_when_called() {
+        // upstream havsfunc builds partial(core.eedi3m.EEDI3, ...) on every QTGMC call.
+        let body = format!(
+            "{FAKE_HAVSFUNC}vhs_plugins.prepare_havsfunc(haf)\n\
+             from functools import partial\n\
+             f = partial(haf.core.eedi3m.EEDI3, field=3)\n\
+             print('built')\n\
+             try:\n    f(None)\nexcept vs.Error as e:\n    print(e)"
+        );
+        let out = run_loader("eedi3m-missing", &[], None, &body);
+        assert_eq!(
+            out,
+            "built\needi3m.EEDI3 needs the eedi3m plugin, which is not installed"
+        );
+    }
+
+    #[test]
+    fn an_installed_eedi3m_is_passed_through() {
+        let body = format!(
+            "{FAKE_HAVSFUNC}vhs_plugins.prepare_havsfunc(haf)\nprint(haf.core.eedi3m is vs.core.eedi3m)"
+        );
+        assert_eq!(run_loader("eedi3m-there", &["eedi3m"], None, &body), "True");
     }
 }
