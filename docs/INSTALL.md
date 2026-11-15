@@ -83,6 +83,33 @@ sudo apt-mark manual libpython3.12t64 libpython3.12-stdlib libpython3.12-minimal
 
 Check: `vspipe --version` prints `Core R55`.
 
+### 2a-bis. Set up VapourSynth from the app (no PPA)
+
+The **Tools** window has a **Set up VapourSynth…** button. It builds a private Python environment in
+`~/.local/share/vhs-gui/vapoursynth` with VapourSynth R81, the `mvtools`, `znedi3` and `vivtc`
+plugins and `vsutil` (five wheels from PyPI, pinned by version and sha256 in
+`assets/vs/requirements.txt`, installed with `--require-hashes --only-binary=:all: --no-deps`),
+downloads `havsfunc.py` from upstream at a pinned commit and refuses it unless its sha256 matches,
+then runs `vapoursynth config` and checks that everything imports. Progress shows in the Upscale view
+and the log is in `~/Videos/logs/`. The plugins without a wheel come from the `.deb` (section 0).
+
+Needs: `python3-venv`, the shared library for your Python (`libpython3.14` on 26.04) and a network
+connection. Once the environment exists, vhs-gui uses its `vspipe` ahead of `/usr/bin/vspipe`;
+delete the folder to go back to the system one. A system VapourSynth is left alone (the wheel
+registers itself under its own library path in `~/.config/vapoursynth/vapoursynth.toml`).
+
+Why havsfunc is fetched and not installed with pip: PyPI's havsfunc 33 calls the old `focus2` plugin
+and 34 needs `vsjetpack`, so neither runs QTGMC here. The pinned commit is the last upstream version
+before it became a package; it imports only `vsutil` (Unlicense).
+
+*Tested:* in an Ubuntu 26.04 container, the same steps end to end, then QTGMC on a short interlaced
+clip (45 frames out) with the packaged plugins; the unit tests cover the steps, the pins and the
+resolver order. *Not tested:* pressing the button in the GUI on this machine.
+
+Licences: VapourSynth LGPL-2.1+, `mvtools` and `znedi3` GPL-2.0, `vivtc` MIT, `vsutil` MIT, havsfunc
+Unlicense. vhs-gui does not ship or link any of them; it only downloads them on request into a
+separate environment and runs them as a separate program (`vspipe`).
+
 ### 2b. Plugins and Python modules
 
 The scripts load these plugins (from `~/.local/share/vsrepo/plugins`, then the system VapourSynth
