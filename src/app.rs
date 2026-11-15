@@ -407,8 +407,13 @@ impl eframe::App for App {
             self.show_paths_window(ctx);
         }
 
-        if self.tools.open {
-            self.tools.show_window(ctx);
+        if self.tools.open && self.tools.show_window(ctx) {
+            // The job's progress shows in the Upscale view.
+            self.view_mode = ViewMode::Upscale;
+            self.upscale.launch_vs_setup(&self.cfg, &mut self.status);
+        }
+        if self.upscale.take_vs_setup_finished() {
+            self.tools.recheck(ctx);
         }
 
         // Monitor view: collapsible Input settings panel (V4L2 hardware controls).
