@@ -83,6 +83,10 @@ finishes it. Last updated 2026-11-07.
       `PipelineJob::start` and its bash call site, and the "Transitional bash dependency" section of
       CLAUDE.md. Needs Ryan to run one.
 - [ ] Anime and B&W native upscale on real material; a worker-level stop-after-segment then resume run.
+- [ ] Letterbox detection and crop (`src/crop.rs`) for Upscale and Viewer Encode: implemented on
+      `feat/letterbox-crop`; needs Ryan's debug test (Detect on a letterboxed EDIT_MASTER, then an
+      upscale and a viewer encode of it; Detect on a full-frame file). Later: pillarbox, a crop that
+      changes inside one file, entering a crop by hand, remembering a detection across restarts.
 - [ ] GUI test of VDecimate on an `EDIT_MASTER*.mkv`.
 - [ ] Verify the INSTALL.md steps nobody ran: ncnn zip layout, model archive layouts, rebuilding the
       ROCm venv in a scratch location, a fresh VapourSynth install on 26.04 (vsrepo cannot run there:
