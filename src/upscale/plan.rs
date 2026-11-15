@@ -362,35 +362,66 @@ fn args(items: &[&str]) -> Vec<OsString> {
     items.iter().map(OsString::from).collect()
 }
 
+/// Which source frames belong to one segment, as timestamps in the source's own timeline.
+///
+/// A segment takes the frames with `lo <= pts < hi`. Segment `i`'s `hi` is segment `i + 1`'s `lo`
+/// (the same number), so every frame lands in exactly one segment. Cutting by `-ss`/`-t` instead
+/// repeated a frame at every boundary on sources whose timeline does not start at zero (a viewer
+/// copy starts at -0.021 s), and ffmpeg's constant-frame-rate conversion added another.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Window {
+    /// Where to seek: early enough to cover `lo` whatever the container's start offset.
+    pub seek: f64,
+    pub lo: f64,
+    pub hi: f64,
+}
+
+/// Every boundary is moved this far back, so a frame stamped a hair under a whole number of
+/// segment lengths (1.4009999 for 1.401) is not misfiled. Frames are at least milliseconds apart,
+/// and both neighbours use the same boundary, so the partition stays exact.
+const BOUNDARY_SHIFT: f64 = 0.0005;
+/// How far before `lo` to seek, covering a container start offset the probe could not see.
+const SEEK_LEAD: f64 = 2.0;
+/// Extra seconds read past `hi`, so ffmpeg stops reading soon after the window without cutting it.
+const READ_MARGIN: f64 = 1.0;
+
+/// The window for segment `i`. `origin` is the timestamp of the source's first frame and
+/// `start_time` the container's start offset (`-ss` is relative to it).
+pub fn segment_window(i: u64, segment_secs: u32, origin: f64, start_time: f64) -> Window {
+    let len = f64::from(segment_secs);
+    let boundary = |k: u64| origin + k as f64 * len - BOUNDARY_SHIFT;
+    let (lo, hi) = (boundary(i), boundary(i + 1));
+    Window {
+        seek: (lo - SEEK_LEAD - start_time).max(0.0),
+        lo,
+        hi,
+    }
+}
+
 /// Frame extraction for one segment. B&W always filters and forces RGB (the upscaler needs it).
-pub fn extract_args(
-    spec: &JobSpec,
-    layout: &Layout,
-    start: u64,
-    len: u64,
-    filter: &str,
-) -> Vec<OsString> {
+///
+/// `-copyts` keeps the source timestamps so the `select` can use them, `-fps_mode passthrough`
+/// stops ffmpeg duplicating or dropping frames to a constant rate, and the input `-t` only bounds
+/// how much is read.
+pub fn extract_args(spec: &JobSpec, layout: &Layout, win: &Window, filter: &str) -> Vec<OsString> {
     let mut a = args(&[
         "-y",
         "-ss",
-        &start.to_string(),
+        &format!("{:.6}", win.seek),
         "-t",
-        &len.to_string(),
+        &format!("{:.6}", win.hi - win.seek + READ_MARGIN),
+        "-copyts",
         "-i",
     ]);
     a.push(spec.input.clone().into());
-    a.push("-an".into());
-    match spec.variant {
-        Variant::Bw => {
-            a.push("-vf".into());
-            a.push(format!("{filter},format=rgb24").into());
-        }
-        _ if !filter.is_empty() => {
-            a.push("-vf".into());
-            a.push(filter.into());
-        }
-        _ => {}
-    }
+    a.extend(args(&["-an", "-fps_mode", "passthrough", "-vf"]));
+    let select = format!("select='gte(t,{:.6})*lt(t,{:.6})'", win.lo, win.hi);
+    let chain = match spec.variant {
+        Variant::Bw => format!("{select},{filter},format=rgb24"),
+        _ if filter.is_empty() => select,
+        _ => format!("{select},{filter}"),
+    };
+    a.push(chain.into());
     a.extend(args(&["-qscale:v", &spec.jpeg_quality.to_string()]));
     a.push(layout.frames_dir.join("frame_%08d.jpg").into());
     a
@@ -473,6 +504,45 @@ pub fn probe_duration_args(file: &Path) -> Vec<OsString> {
         "error",
         "-show_entries",
         "format=duration",
+        "-of",
+        "csv=p=0",
+    ]);
+    a.push(file.into());
+    a
+}
+
+/// The first few packets' timestamps, for [`first_pts`].
+pub fn probe_first_pts_args(file: &Path) -> Vec<OsString> {
+    let mut a = args(&[
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "packet=pts_time",
+        "-read_intervals",
+        "%+#16",
+        "-of",
+        "csv=p=0",
+    ]);
+    a.push(file.into());
+    a
+}
+
+/// The smallest timestamp in `ffprobe` output: B-frame reordering means the first packet is not
+/// always the first frame shown.
+pub fn first_pts(text: &str) -> Option<f64> {
+    text.lines()
+        .filter_map(|l| l.trim().parse::<f64>().ok())
+        .min_by(f64::total_cmp)
+}
+
+pub fn probe_start_time_args(file: &Path) -> Vec<OsString> {
+    let mut a = args(&[
+        "-v",
+        "error",
+        "-show_entries",
+        "format=start_time",
         "-of",
         "csv=p=0",
     ]);
@@ -733,12 +803,83 @@ mod tests {
     }
 
     #[test]
+    fn neighbouring_windows_share_their_boundary_exactly() {
+        for (origin, start) in [(0.0, 0.0), (0.0, -0.021), (1.401, 1.4), (3600.0, 3600.0)] {
+            for i in 0..50 {
+                let a = segment_window(i, 30, origin, start);
+                let b = segment_window(i + 1, 30, origin, start);
+                assert_eq!(a.hi.to_bits(), b.lo.to_bits(), "origin {origin} i {i}");
+                // The text ffmpeg is given is identical too.
+                assert_eq!(format!("{:.6}", a.hi), format!("{:.6}", b.lo));
+            }
+        }
+    }
+
+    /// The bug this replaces: at 29.97 fps on a source that starts at -0.021 s, every boundary
+    /// frame was extracted twice. Here every frame lands in exactly one window.
+    #[test]
+    fn every_frame_of_a_29_97_source_lands_in_exactly_one_segment() {
+        let pts = |k: u64| k as f64 * 1001.0 / 30000.0;
+        let windows: Vec<Window> = (0..60)
+            .map(|i| segment_window(i, 30, 0.0, -0.021))
+            .collect();
+        let end = windows.last().unwrap().hi;
+        let frames = (0..).take_while(|&k| pts(k) < end).count() as u64;
+        let mut per_segment = vec![0u32; windows.len()];
+        for k in 0..frames {
+            let hits: Vec<usize> = (0..windows.len())
+                .filter(|&i| pts(k) >= windows[i].lo && pts(k) < windows[i].hi)
+                .collect();
+            assert_eq!(hits.len(), 1, "frame {k} at {} s", pts(k));
+            per_segment[hits[0]] += 1;
+        }
+        // 30 s is 899.1 frames: segments hold 899 or 900, never more.
+        assert!(
+            per_segment.iter().all(|&n| n == 899 || n == 900),
+            "{per_segment:?}"
+        );
+        assert_eq!(per_segment.iter().sum::<u32>() as u64, frames);
+    }
+
+    #[test]
+    fn the_seek_leads_the_window_and_follows_the_containers_start_offset() {
+        // A negative start offset cannot push the seek below zero.
+        assert_eq!(segment_window(0, 30, 0.0, -0.021).seek, 0.0);
+        // -ss is relative to the container's start, so a source starting at 5 s seeks 5 s earlier.
+        let w = segment_window(3, 30, 5.0, 5.0);
+        assert!((w.lo - 94.9995).abs() < 1e-9);
+        assert!((w.seek - 87.9995).abs() < 1e-9);
+        assert!(
+            w.seek + 5.0 < w.lo,
+            "the seek lands before the first wanted frame"
+        );
+    }
+
+    #[test]
+    fn the_first_timestamp_is_the_smallest_not_the_first_listed() {
+        // B-frames: packets are listed in decode order.
+        assert_eq!(
+            first_pts("0.067000\n0.033000\n0.000000\nN/A\n0.100000\n"),
+            Some(0.0)
+        );
+        assert_eq!(first_pts("N/A\n"), None);
+        assert_eq!(first_pts(""), None);
+    }
+
+    #[test]
     fn command_arguments_are_the_scripts() {
         let s = spec();
         let l = s.layout();
         assert_eq!(
-            joined(&extract_args(&s, &l, 30, 30, "hqdn3d=3:2:4:3")),
-            "-y -ss 30 -t 30 -i /in/Tape One.mkv -an -vf hqdn3d=3:2:4:3 -qscale:v 2 /work/Tape One/frames/frame_%08d.jpg"
+            joined(&extract_args(
+                &s,
+                &l,
+                &segment_window(1, 30, 0.0, 0.0),
+                "hqdn3d=3:2:4:3"
+            )),
+            "-y -ss 27.999500 -t 33.000000 -copyts -i /in/Tape One.mkv -an -fps_mode passthrough \
+             -vf select='gte(t,29.999500)*lt(t,59.999500)',hqdn3d=3:2:4:3 -qscale:v 2 \
+             /work/Tape One/frames/frame_%08d.jpg"
         );
         assert_eq!(
             joined(&upscale_args(&s, &l)).split(" -m ").next().unwrap(),
@@ -777,8 +918,13 @@ mod tests {
         s.variant = Variant::Bw;
         let l = s.layout();
         assert!(
-            joined(&extract_args(&s, &l, 0, 30, "hqdn3d=3:2:4:3,hue=s=0"))
-                .contains("-vf hqdn3d=3:2:4:3,hue=s=0,format=rgb24 ")
+            joined(&extract_args(
+                &s,
+                &l,
+                &segment_window(0, 30, 0.0, 0.0),
+                "hqdn3d=3:2:4:3,hue=s=0"
+            ))
+            .contains(",hqdn3d=3:2:4:3,hue=s=0,format=rgb24 ")
         );
         assert!(
             joined(&rebuild_args(
