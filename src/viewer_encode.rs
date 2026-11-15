@@ -2,6 +2,7 @@
 //!
 //! One ffmpeg call. The source height picks the preset, exactly as the script's auto mode does:
 //!   * height <= 576 (SD/VHS): x264 CRF 18, `fast`, main@4.0, scaled to 640x480 (Lanczos), 30000/1001
+//!     (a 24 fps film master keeps its own rate and a 25 fps source stays 25: see [`sd_cfr`])
 //!   * taller (HD):            x264 CRF 20, `medium`, high@4.1, no scaling, CFR from the probed rate
 //!
 //! Audio is AAC-LC 320k stereo at 48 kHz. Output is `captures/viewer/<stem>.viewer.mkv`; an existing
@@ -77,6 +78,22 @@ pub fn pick_cfr(fps: f64) -> String {
     }
 }
 
+/// The constant rate for an SD source. The script forced 30000/1001 on everything, which gave a
+/// 24 fps film master (a VDecimate output) a repeated frame in every five and made any upscale of
+/// the copy 29.97 fps with those repeats. Film rates and 25 fps now keep their own rate; every
+/// other SD rate (NTSC video, or an unreadable one) stays at 30000/1001 as before.
+pub fn sd_cfr(fps: f64) -> String {
+    if (fps - 24000.0 / 1001.0).abs() < 0.005 {
+        "24000/1001".into()
+    } else if (23.9..24.1).contains(&fps) {
+        "24".into()
+    } else if (24.9..25.1).contains(&fps) {
+        "25".into()
+    } else {
+        "30000/1001".into()
+    }
+}
+
 pub fn plan(src: &Source) -> Plan {
     if src.height <= SD_MAX_HEIGHT {
         Plan {
@@ -87,7 +104,7 @@ pub fn plan(src: &Source) -> Plan {
             crf: 18,
             scale: Some((640, 480)),
             crop: None,
-            cfr: "30000/1001".into(),
+            cfr: sd_cfr(src.fps),
         }
     } else {
         Plan {
@@ -315,8 +332,9 @@ mod tests {
             assert_eq!(p.preset, Preset::Vhs, "{w}x{h}");
             assert_eq!(p.crf, 18);
             assert_eq!(p.scale, Some((640, 480)));
-            // The VHS preset forces 29.97 regardless of the source rate, as the script does.
-            assert_eq!(p.cfr, "30000/1001");
+            // A 25 fps source keeps its rate; 29.97 and unknown rates are covered in
+            // `sd_film_and_pal_sources_keep_their_own_rate`.
+            assert_eq!(p.cfr, "25");
         }
         let hd = plan(&src(720, 577, 25.0));
         assert_eq!(hd.preset, Preset::Hd);
@@ -382,6 +400,41 @@ mod tests {
         let (w, h) = plan(&s).with_crop(&s, c).scale.unwrap();
         assert_eq!((w, h), (568, 276)); // 640 * 640 / 720, rounded down by integer division
         assert!(w.is_multiple_of(2) && h.is_multiple_of(2));
+    }
+
+    #[test]
+    fn sd_film_and_pal_sources_keep_their_own_rate() {
+        for (fps, want) in [
+            (24.0, "24"),               // a VDecimate master
+            (23.976_024, "24000/1001"), // film rate as NTSC
+            (23.98, "24000/1001"),      // the average rate of a slightly variable file
+            (25.0, "25"),               // PAL
+            (29.970_03, "30000/1001"),  // NTSC video, as the script always did
+            (30.0, "30000/1001"),
+            (0.0, "30000/1001"),   // no rate reported
+            (59.94, "30000/1001"), // nothing else is guessed at
+        ] {
+            assert_eq!(sd_cfr(fps), want, "{fps}");
+        }
+    }
+
+    #[test]
+    fn a_24_fps_sd_master_is_encoded_at_24_not_padded_to_29_97() {
+        let p = plan(&src(720, 480, 24.0));
+        assert_eq!(p.preset, Preset::Vhs);
+        let args = strings(&ffmpeg_args(
+            Path::new("/in/a.mkv"),
+            Path::new("/out/a.mkv"),
+            &p,
+        ))
+        .join(" ");
+        assert!(args.contains("-fps_mode cfr -r 24 "), "{args}");
+        assert!(!args.contains("30000/1001"), "{args}");
+        // The rest of the VHS preset is unchanged.
+        assert_eq!(
+            (p.crf, p.x264_preset, p.scale),
+            (18, "fast", Some((640, 480)))
+        );
     }
 
     #[test]
@@ -482,10 +535,10 @@ mod tests {
     /// The real `launch` path with real ffmpeg: generate a short SD clip, encode it, check the
     /// result, and check a second launch leaves the existing copy alone. Writes only under a temp
     /// directory. Not run by default (`cargo test -- --ignored`).
-    #[test]
-    #[ignore]
-    fn end_to_end_smoke() {
-        let guard = TempDir::new("vhs-gui-viewer-e2e");
+    /// Encodes a 3 s synthetic 720x480 FFV1 clip at `rate` through `launch`, waits for it, and
+    /// returns the scratch dir guard, config, input and output paths.
+    fn encode_synthetic(name: &str, rate: &str) -> (TempDir, Config, PathBuf, PathBuf) {
+        let guard = TempDir::new(name);
         let dir = guard.0.clone();
         let cfg = Config {
             videos_dir: dir.clone(),
@@ -495,12 +548,8 @@ mod tests {
         let input = dir.join("clip_VD.mkv");
         let made = tools::command(Tool::Ffmpeg)
             .args(["-hide_banner", "-loglevel", "error", "-y"])
-            .args([
-                "-f",
-                "lavfi",
-                "-i",
-                "testsrc2=size=720x480:rate=30000/1001:duration=3",
-            ])
+            .args(["-f", "lavfi", "-i"])
+            .arg(format!("testsrc2=size=720x480:rate={rate}:duration=3"))
             .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=3"])
             .args(["-c:v", "ffv1", "-c:a", "pcm_s16le", "-shortest"])
             .arg(&input)
@@ -524,29 +573,42 @@ mod tests {
         assert!(job.done, "encode did not finish in 60 s");
         assert_eq!(job.exit_ok, Some(true));
         assert!(output.is_file());
+        (guard, cfg, input, output)
+    }
 
-        let probe = |sel: &str, entries: &str| {
-            let out = tools::command(Tool::Ffprobe)
-                .args([
-                    "-v",
-                    "error",
-                    "-select_streams",
-                    sel,
-                    "-show_entries",
-                    entries,
-                ])
-                .args(["-of", "csv=p=0"])
-                .arg(&output)
-                .output()
-                .unwrap();
-            String::from_utf8_lossy(&out.stdout).trim().to_string()
-        };
+    fn probe_output(output: &Path, sel: &str, entries: &str) -> String {
+        let out = tools::command(Tool::Ffprobe)
+            .args(["-v", "error", "-count_frames", "-select_streams", sel])
+            .args(["-show_entries", entries, "-of", "csv=p=0"])
+            .arg(output)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A 24 fps film master (a VDecimate output) keeps 24 fps and its 72 frames instead of being
+    /// padded to 29.97 with repeated frames.
+    #[test]
+    #[ignore]
+    fn a_24_fps_master_is_not_padded_to_29_97() {
+        let (_guard, _cfg, _input, output) = encode_synthetic("vhs-gui-viewer-24", "24");
         assert_eq!(
-            probe("v:0", "stream=codec_name,width,height,pix_fmt"),
+            probe_output(&output, "v:0", "stream=r_frame_rate,nb_read_frames"),
+            "24/1,72"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn end_to_end_smoke() {
+        let (_guard, cfg, input, output) = encode_synthetic("vhs-gui-viewer-e2e", "30000/1001");
+
+        assert_eq!(
+            probe_output(&output, "v:0", "stream=codec_name,width,height,pix_fmt"),
             "h264,640,480,yuv420p"
         );
         assert_eq!(
-            probe("a:0", "stream=codec_name,sample_rate,channels"),
+            probe_output(&output, "a:0", "stream=codec_name,sample_rate,channels"),
             "aac,48000,2"
         );
 
@@ -584,6 +646,8 @@ mod tests {
         let cases = [
             ("720", "480", "30000/1001"),
             ("640", "480", "30000/1001"),
+            ("720", "480", "24/1"),
+            ("720", "480", "24000/1001"),
             ("720", "576", "25/1"),
             ("768", "576", "25/1"),
             ("720", "577", "30000/1001"),
@@ -610,13 +674,22 @@ mod tests {
                 .unwrap();
             assert!(status.success(), "script failed for {w}x{h} {rate}");
 
-            let from_script: Vec<String> = fs::read_to_string(dir.join("argv.txt"))
+            let mut from_script: Vec<String> = fs::read_to_string(dir.join("argv.txt"))
                 .unwrap()
                 .lines()
                 .map(String::from)
                 .collect();
             let source = parse_probe(&probe).unwrap();
-            let ours = strings(&ffmpeg_args(&input, &output, &plan(&source)));
+            let p = plan(&source);
+            // The one deliberate difference: the script forces 30000/1001 on every SD source, but
+            // film and 25 fps sources keep their own rate (`sd_cfr`). Everything else must match.
+            if p.preset == Preset::Vhs
+                && p.cfr != "30000/1001"
+                && let Some(i) = from_script.iter().position(|a| a == "-r")
+            {
+                from_script[i + 1] = p.cfr.clone();
+            }
+            let ours = strings(&ffmpeg_args(&input, &output, &p));
             assert_eq!(ours, from_script, "{w}x{h} @ {rate}");
         }
     }
