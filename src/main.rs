@@ -3,6 +3,7 @@ mod audio_cleanup;
 mod capture;
 mod clock;
 mod config;
+mod crop;
 mod denoise;
 mod fix_sync;
 mod library;
