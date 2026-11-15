@@ -108,6 +108,17 @@ crop is refused like any other changed setting. The output size comes from the c
 the source's pixel shape (`plan::output_size` with a crop: 720x276 from a 4:3 720x480 frame at 2x is
 1280x552). The script engine has no crop, so the GUI refuses a cropped job on it.
 
+### Which frames a segment takes
+A segment takes the source frames whose timestamp lies in `[lo, hi)` (`plan::segment_window`,
+`-copyts` + a `select` filter + `-fps_mode passthrough`), with `lo`/`hi` being multiples of the segment
+length from the source's first frame, so each frame is in exactly one segment. The scripts cut with
+`-ss`/`-t`, which on a viewer copy (29.97 fps, timeline starting at -0.021 s) extracted 901 frames per 30 s:
+one repeated at every boundary, plus one that ffmpeg's constant-rate conversion duplicated. A 29.97 fps
+source now gives segments of 899 or 900 frames. The engine keeps the source's own frame rate, so a 24 fps
+master gives 24 fps frames; a viewer copy of a film is 29.97 fps with a repeated frame in every five (Viewer
+Encode's SD preset forces 29.97), so film should be upscaled from its VD master. The golden tests
+normalize this deliberate difference (and the two extra timeline probes) away.
+
 ### Sub-phases
 - **5a** engine core, worker, standard variant, `.part` handling, settings toggle, golden and
   equivalence tests. Script path stays the default.
