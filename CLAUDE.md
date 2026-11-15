@@ -97,8 +97,8 @@ DISPLAY=:0 ./target/debug/vhs-gui
   `clamp_final_scale` keeps Final Scale something the scripts accept (<= and a
   divisor of the internal scale); both run at launch, not just in the panel.
 - **`src/tools.rs`** + **`src/panels/tools.rs`** — the single resolver for external tools
-  (`Tool`, `resolve`, `require`, `command`; order: `VHS_GUI_<TOOL>` override, bundled dir,
-  `/usr/bin`, `~/bin`+`PATH`) and the background startup check behind the Tools window and the
+  (`Tool`, `resolve`, `require`, `command`; order: `VHS_GUI_<TOOL>` override, the private
+  VapourSynth environment (`vspipe` only), bundled dir, `/usr/bin`, `~/bin`+`PATH`) and the background startup check behind the Tools window and the
   toolbar warning. Never hardcode `/usr/bin/<tool>` or call `Command::new("ffmpeg")`; use
   `tools::command(Tool::X)` or `tools::require(Tool::X)?` before spawning. `/usr/bin` precedes
   `PATH` on purpose: `/usr/local/bin/ffmpeg` is the DeckLink build and must not be picked up here.
@@ -121,6 +121,13 @@ DISPLAY=:0 ./target/debug/vhs-gui
   programs; the ignored golden test compares the engine with the real script, and
   `tests/upscale_equivalence.rs` (ignored, needs the GPU) compares real outputs. Read
   `docs/upscale-engine-design.md` before changing any of it.
+- **`src/vs_setup.rs`** — the Tools window's "Set up VapourSynth": a five-step `SeqStep` job (create a venv
+  in `~/.local/share/vhs-gui/vapoursynth`, `pip install --require-hashes --only-binary=:all: --no-deps`
+  from `assets/vs/requirements.txt`, download `havsfunc.py` at a pinned commit and sha256, `vapoursynth
+  config`, import check). `tools::SearchPath.private` puts that environment's `vspipe` ahead of
+  `/usr/bin`, and `vs_stack` looks for modules in its `site-packages`. Regenerate the wheel pins with
+  `scripts/pin-vs-requirements.py`; change the havsfunc pin only after QTGMC has been run with the new
+  file (in a container).
 - **`scripts/package-deb.sh`** + **`packaging/`** — builds the `.deb` (release binary, desktop entry, icon,
   licences, and the three plugin libraries from `scripts/build-vs-plugins.sh` in
   `/usr/lib/vhs-gui/vs-plugins`). Plugin search order lives in both `assets/vs/vhs_plugins.py`
@@ -155,8 +162,10 @@ DISPLAY=:0 ./target/debug/vhs-gui
   `field_align`, `vdecimate` `.vpy` and the `vhs_plugins.py` plugin loader) embedded with
   `include_str!`. `materialize()` writes them to `$XDG_CACHE_HOME/vhs-gui/vs/<content-hash>/` and
   `vs_ops` runs vspipe from there with that dir first on `PYTHONPATH`. Plugins are looked up by file
-  name (`VS_PLUGIN_DIRS` overrides), never by absolute path. `havsfunc` (Unlicense) and `vsutil` (MIT) stay
-  external in `~/.local/share/vsrepo/py`; `vhs_plugins.prepare_havsfunc` makes havsfunc call znedi3 on R81 (see ROADMAP.md).
+  name (`VS_PLUGIN_DIRS` overrides), never by absolute path. `havsfunc` (Unlicense) and `vsutil` (MIT) are
+  not embedded: they come from `~/.local/share/vsrepo/py` or from the environment `vs_setup` builds;
+  `vhs_plugins.prepare_havsfunc` makes havsfunc call znedi3 on R81 and gives it a stand-in for a missing
+  `eedi3m` (see ROADMAP.md).
 - **`src/mpv_view.rs`** — `MpvView` owns the leaked `&'static Mpv` and its
   `RenderContext`, GL thread only. Its `Drop` replaces the repaint callback with a
   zero-sized no-op before the context is freed: `libmpv2` frees the callback's
