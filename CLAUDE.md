@@ -129,7 +129,7 @@ DISPLAY=:0 ./target/debug/vhs-gui
   (`JobSpec.crop`, native engine only) and before the Viewer Encode scale. Results are kept in memory,
   per file.
 - **`src/viewer_encode.rs`** — native port of `vhs_viewer_encode.sh` (Viewer Encode button). `plan` picks
-  the SD/VHS or HD preset from the source height (`Plan::with_crop` adds a letterbox crop), `ffmpeg_args` builds the argument list as a pure
+  the SD/VHS or HD preset from the source height (`Plan::with_crop` adds a letterbox crop; `sd_cfr` keeps a 24 fps film master at 24 and a 25 fps source at 25, other SD rates are 30000/1001), `ffmpeg_args` builds the argument list as a pure
   function, `launch` returns `Started(job, output)` or `Exists(path)` (an existing viewer copy is never
   overwritten). The ignored `matches_the_bash_script` test runs the real script with stub ffmpeg/ffprobe
   and compares arguments; rerun it after any change here.

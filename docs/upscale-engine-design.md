@@ -115,8 +115,9 @@ length from the source's first frame, so each frame is in exactly one segment. T
 `-ss`/`-t`, which on a viewer copy (29.97 fps, timeline starting at -0.021 s) extracted 901 frames per 30 s:
 one repeated at every boundary, plus one that ffmpeg's constant-rate conversion duplicated. A 29.97 fps
 source now gives segments of 899 or 900 frames. The engine keeps the source's own frame rate, so a 24 fps
-master gives 24 fps frames; a viewer copy of a film is 29.97 fps with a repeated frame in every five (Viewer
-Encode's SD preset forces 29.97), so film should be upscaled from its VD master. The golden tests
+master gives 24 fps frames. Viewer copies of a film made before 2026-11-15 are 29.97 fps with a repeated
+frame in every five (Viewer Encode's SD preset used to force 29.97), so upscale film from its VD master;
+copies made since then keep 24 fps (`viewer_encode::sd_cfr`). The golden tests
 normalize this deliberate difference (and the two extra timeline probes) away.
 
 ### Sub-phases
