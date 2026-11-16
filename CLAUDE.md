@@ -203,10 +203,15 @@ loudnorm, and a "Find Quiet Spot" noise-sample-window scan; see
 `start_native_sequence`/`SeqStep` in `pipeline.rs` for the underlying job shape),
 `v0.3.5` (live-extendable capture Cap timer with a 6 h ffmpeg backstop, hardened
 upscale reattach, Final Scale clamped to the model's internal scale, and a fix for
-the segfault on exit from a freed mpv update callback).
-System install target: `/usr/local/bin/vhs-gui`, launched via
-`~/.local/share/applications/vhs-gui.desktop` (`install-desktop.sh` manages both).
-Release process: `cargo build --release` → `sudo install` → bump `Cargo.toml` → tag.
+the segfault on exit from a freed mpv update callback), `v0.4.0` (self-contained: no bash
+scripts, native upscale engine only, letterbox crop, the "Set up VapourSynth" button, and
+`.deb` packages for Ubuntu 24.04 and 26.04).
+System install: the `.deb` (`/usr/bin/vhs-gui`, `/usr/share/applications/vhs-gui.desktop`,
+plugins in `/usr/lib/vhs-gui/vs-plugins`). `install-desktop.sh` is the older hand install
+into `/usr/local/bin` and `~/.local/share/applications`; remove those when using the package.
+Release process: bump `Cargo.toml` (and `Cargo.lock` via `cargo check`) → merge into `main` →
+tag → `scripts/package-deb.sh --container 24.04` and `26.04` from the tagged commit →
+attach both `.deb` files to the GitHub release.
 
 `[profile.release]` sets `strip = true` — the installed production binary has no
 symbols. A crash address from `dmesg`/`journalctl` won't resolve against it. To
