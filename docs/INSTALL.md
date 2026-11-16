@@ -21,8 +21,10 @@ need the same programs with different install commands.
 
 ## 0. The .deb package (optional)
 
-`scripts/package-deb.sh` builds `dist/vhs-gui_<version>-1_amd64.deb` for the Ubuntu release it runs
-on: the release binary, desktop entry and icon, and the three VapourSynth plugins that have no
+Releases carry a `.deb` for Ubuntu 24.04 and one for 26.04; pick the one for your release.
+`scripts/package-deb.sh [--container] [release]` builds `dist/vhs-gui_<version>-1~ubuntu<release>_amd64.deb`
+(for another release than this machine's, or with `--container`, inside a clean container of that
+release, which needs docker): the release binary, desktop entry and icon, and the three VapourSynth plugins that have no
 Python wheel (`ffms2`, `fmtconv`, `miscfilters`), built from pinned source in a container
 (`scripts/build-vs-plugins.sh`, which needs docker). The plugins link the distro's FFmpeg libraries,
 so a package only works on the release it was built for. Install it with
@@ -36,9 +38,10 @@ own `~/.local/share/vsrepo/plugins`, so a copy you installed yourself wins. A ha
 `/usr/local/bin/vhs-gui` comes first on `PATH`; remove it, and the old `~/.local/share/applications`
 entry, once the package is in.
 
-*Tested:* the package builds, `lintian` and `dpkg-deb` accept it, the files unpack to the right
-places, the binary's libraries resolve and the plugins load from the unpacked directory under R81.
-*Not tested:* installing it with `apt`, and building for 24.04.
+*Tested:* both packages build in containers and `lintian` accepts them; on 26.04 the package was
+installed with `apt` and the app run from it; the 24.04 plugins load under R81 in a 24.04 container
+and the 24.04 package installs with `apt` in a clean 24.04 container, where the binary's libraries
+resolve. *Not tested:* running the GUI on a real 24.04 machine.
 
 ## 1. System packages
 
