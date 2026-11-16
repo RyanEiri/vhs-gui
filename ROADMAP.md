@@ -2,7 +2,7 @@
 
 Goal: one executable that needs no vhs-cli checkout and no bash scripts, shipped as a portable
 package. Work is done in phases, one branch and PR per phase. Tick a box in the same PR that
-finishes it. Last updated 2026-11-07.
+finishes it. Last updated 2026-11-16.
 
 ## What "self-contained" means here
 
@@ -125,6 +125,14 @@ Recommended shape, replacing the earlier "two packages" idea:
       checked: layout, library resolution, plugins loading under R81 through `vhs_plugins.load`.
       Not done: installing it with `apt` (Ryan), a 24.04 build. ffms2's licence is confirmed: MIT
       source, with binaries that follow how FFmpeg was built.
+- [x] **Release 0.4.0 packaging** (2026-11-16). `scripts/package-deb.sh --container <release>` builds in a
+      clean container of that release (`packaging/Dockerfile.build`, Rust pinned to 1.99.1), so the
+      binary links that release's glibc and libmpv; packages are named
+      `vhs-gui_<ver>-1~ubuntu<release>_amd64.deb`. `scripts/build-vs-plugins.sh` checks another
+      release's plugins in a container of that release. Built for 24.04 and 26.04: `lintian` shows one
+      warning each (no man page), each installs with `apt` in a clean container of its release, every
+      library resolves and `vhs-gui upscale-worker` runs. Not tested: the GUI on a real 24.04 machine
+      (the 26.04 one is in daily use from the 0.3.5 package).
 - [x] **6c, "Set up VapourSynth"** (2026-11-15). A Tools window button builds a private venv in
       `~/.local/share/vhs-gui/vapoursynth` (`src/vs_setup.rs`): VapourSynth R81, `mvtools`, `znedi3`,
       `vivtc` and `vsutil` as wheels pinned by version and sha256 (`assets/vs/requirements.txt`,

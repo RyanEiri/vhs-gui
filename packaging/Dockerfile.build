@@ -1,0 +1,14 @@
+# The build environment for a vhs-gui .deb: one image per Ubuntu release, so the binary links that
+# release's glibc and libmpv and dpkg-shlibdeps names that release's packages. Used by
+# scripts/package-deb.sh --container. The toolchain lives in /opt so any uid can run it.
+ARG UBUNTU=26.04
+FROM ubuntu:${UBUNTU}
+ARG RUST=1.99.1
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential ca-certificates curl pkg-config git libmpv-dev dpkg-dev lintian \
+    && rm -rf /var/lib/apt/lists/*
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain ${RUST} --no-modify-path \
+    && chmod -R a+rX /opt/rustup /opt/cargo
+ENV PATH=/opt/cargo/bin:$PATH
