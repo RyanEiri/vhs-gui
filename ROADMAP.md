@@ -149,8 +149,14 @@ Recommended shape, replacing the earlier "two packages" idea:
       release, or bundle ffmpeg libs; (2) the tag `ffms-2.17` is an old line, 5.0 is current;
       (3) miscfilters has no build system, so it is one `g++` call, and it needs
       `filtershared.h` from R73 (R81's copy uses an API 4.3 call); (4) fmtconv is 4.7 MB stripped.
-- [ ] Run QTGMC on a real raw capture under R81 (none is left: the archival was deleted after
-      editing, so a new capture is needed).
+- [x] **QTGMC on a real raw capture under R81** (2026-11-15). A 2 h 30 min capture (720x480, 30 fps,
+      denoised) went through Denoise+QTGMC from the app with `vspipe` from the private environment
+      that "Set up VapourSynth" built (R81, the pinned wheels, Ryan's own havsfunc and plugin
+      folders): 270,581 frames in 53 min 41 s (84 fps, 2.8x real time), 9019.366 s against 9019.373 s
+      for the source, no errors in the log, tail and middle decode clean, and frames sampled at five
+      points (10 min to 2 h 30 min) show the same picture without combing. Not checked: a frame-by-frame
+      comparison with R55's output, and the pinned downloaded havsfunc (the run used Ryan's vsrepo copy,
+      which comes first on `PYTHONPATH`; the pinned one was run in a container).
 - [ ] Optional later: AppImage (linuxdeploy + appimagetool) with `libmpv.so.2`, ffmpeg, ffprobe and
       sox bundled (GPL: ship a sources note), `scripts/package-appimage.sh`, attach to the release,
       test with `/usr/bin/ffmpeg` hidden; Wayland and GL under AppImage can need quirks.
