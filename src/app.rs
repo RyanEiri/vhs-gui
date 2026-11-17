@@ -671,7 +671,7 @@ impl eframe::App for App {
                     self.arm_save();
                 }
             }
-            // Upscale: the settings panel, when the toolbar's Settings toggle is on.
+            // Upscale: the settings panel, open by default; the toolbar's Settings toggle closes it.
             ViewMode::Upscale => {
                 if self.upscale.settings_panel_open {
                     let resp = egui::Panel::left("upscale_settings")

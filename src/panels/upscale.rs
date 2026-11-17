@@ -82,7 +82,7 @@ impl UpscalePanel {
         Self {
             library,
             settings: UpscaleSettings::default(),
-            settings_panel_open: false,
+            settings_panel_open: true,
             pipeline: None,
             chain_after: None,
             inline: Inline::None,
