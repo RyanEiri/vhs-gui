@@ -553,7 +553,11 @@ impl eframe::App for App {
         }
 
         // The setup job's progress is in the status bar, in whichever view the user is.
-        if self.tools.open && self.tools.show_window(ctx) {
+        let setup_running = self
+            .upscale
+            .pipeline_job()
+            .is_some_and(|j| j.label == crate::vs_setup::LABEL);
+        if self.tools.open && self.tools.show_window(ctx, setup_running) {
             self.upscale.launch_vs_setup(&self.cfg, &mut self.status);
         }
         if self.upscale.take_vs_setup_finished() {
