@@ -2,8 +2,10 @@ use std::time::{Duration, Instant};
 
 use crate::capture::{self, CaptureController, OrphanCapture};
 use crate::config::Config;
+use crate::icons;
 use crate::monitor_feed::MonitorFeed;
 use crate::mpv_view::{MpvView, Source};
+use crate::theme;
 use crate::v4l2::V4l2Controls;
 
 /// How often an idle panel looks for a capture it did not start.
@@ -104,7 +106,7 @@ impl MonitorPanel {
                 }
             }
             CaptureState::Monitoring => {
-                ui.label(egui::RichText::new("● MONITOR").color(egui::Color32::GREEN));
+                ui.label(egui::RichText::new("● MONITOR").color(theme::color::SUCCESS));
                 if ui.button("Start Capture").clicked() {
                     self.begin_capture(cfg, status);
                 }
@@ -119,7 +121,7 @@ impl MonitorPanel {
                 ui.label(egui::RichText::new("Releasing device…").italics());
             }
             CaptureState::Capturing => {
-                ui.label(egui::RichText::new("● CAPTURE").color(egui::Color32::RED));
+                ui.label(egui::RichText::new("● CAPTURE").color(theme::color::DANGER));
                 let stats = self.capture.stats.lock().unwrap().clone();
                 ui.label(format!(
                     "  {}  frame {}  {}  {}",
@@ -150,9 +152,13 @@ impl MonitorPanel {
                 if let Some(deadline) = self.capture_stop_at {
                     let remaining = deadline.saturating_duration_since(Instant::now());
                     ui.label(
-                        egui::RichText::new(format!("⏱ {}", fmt_secs(remaining.as_secs())))
-                            .color(egui::Color32::YELLOW)
-                            .small(),
+                        egui::RichText::new(format!(
+                            "{} {}",
+                            icons::TIME,
+                            fmt_secs(remaining.as_secs())
+                        ))
+                        .color(theme::color::WARNING)
+                        .small(),
                     );
                 }
             }
@@ -325,11 +331,12 @@ impl MonitorPanel {
         };
         ui.label(
             egui::RichText::new(format!(
-                "⚠ A capture is already running: {} (for {})",
+                "{} A capture is already running: {} (for {})",
+                icons::WARNING,
                 orphan.name(),
                 fmt_secs(orphan.age_secs)
             ))
-            .color(egui::Color32::YELLOW),
+            .color(theme::color::WARNING),
         );
         if orphan.is_group_leader()
             && ui

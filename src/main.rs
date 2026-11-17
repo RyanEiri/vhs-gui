@@ -6,6 +6,9 @@ mod config;
 mod crop;
 mod denoise;
 mod fix_sync;
+// Landed in phases; each phase uses more of it. The last phase removes this allow.
+#[allow(dead_code)]
+mod icons;
 mod library;
 mod monitor_feed;
 mod mpv_view;
@@ -13,6 +16,9 @@ mod panels;
 mod persist;
 mod pipeline;
 mod settings;
+// Landed in phases; each phase uses more of it. The last phase removes this allow.
+#[allow(dead_code)]
+mod theme;
 mod tools;
 mod upscale;
 mod v4l2;

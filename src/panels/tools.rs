@@ -3,6 +3,8 @@
 //! check spawns `--version` subprocesses, so it runs on a background thread and the UI polls
 //! for the result.
 
+use crate::icons;
+use crate::theme;
 use crossbeam_channel::{Receiver, TryRecvError};
 
 use crate::tools::{self, ToolStatus};
@@ -99,14 +101,14 @@ impl ToolsPanel {
                                 .on_hover_text(format!("Used for: {}", s.tool.needed_for()));
                             match &s.path {
                                 Some(p) => {
-                                    ui.label(egui::RichText::new("✓").color(egui::Color32::GREEN));
+                                    ui.label(egui::RichText::new(icons::OK).color(theme::color::SUCCESS));
                                     ui.label(s.version.as_deref().unwrap_or("-"));
                                     ui.label(egui::RichText::new(p.display().to_string()).small());
                                 }
                                 None => {
                                     ui.label(
-                                        egui::RichText::new("⚠ missing")
-                                            .color(egui::Color32::YELLOW),
+                                        egui::RichText::new(format!("{} missing", icons::WARNING))
+                                            .color(theme::color::WARNING),
                                     );
                                     ui.label("-");
                                     ui.label(egui::RichText::new(s.tool.hint()).small().weak());
@@ -131,13 +133,13 @@ impl ToolsPanel {
                                 .on_hover_text(format!("Needed for: {}", s.need.used_by));
                             match &s.found {
                                 Some(p) => {
-                                    ui.label(egui::RichText::new("✓").color(egui::Color32::GREEN));
+                                    ui.label(egui::RichText::new(icons::OK).color(theme::color::SUCCESS));
                                     ui.label(egui::RichText::new(p.display().to_string()).small());
                                 }
                                 None => {
                                     ui.label(
-                                        egui::RichText::new("⚠ missing")
-                                            .color(egui::Color32::YELLOW),
+                                        egui::RichText::new(format!("{} missing", icons::WARNING))
+                                            .color(theme::color::WARNING),
                                     );
                                     ui.label(
                                         egui::RichText::new(format!("{kind}, see docs/INSTALL.md"))

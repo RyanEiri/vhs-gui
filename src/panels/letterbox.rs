@@ -4,6 +4,8 @@
 //! detected again, and a resumed upscale whose crop is missing is refused by the work directory's
 //! settings check rather than mixing cropped and uncropped segments.
 
+use crate::icons;
+use crate::theme;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -66,7 +68,8 @@ impl Letterbox {
                         ui.horizontal(|ui| {
                             ui.label(
                                 egui::RichText::new(format!(
-                                    "🔍 Detecting... {}",
+                                    "{} Detecting... {}",
+                                    icons::SEARCH,
                                     scan.elapsed_str()
                                 ))
                                 .small()
@@ -90,7 +93,10 @@ impl Letterbox {
                     }
                 }
             }
-        } else if ui.button("🔍 Detect Letterbox").clicked() {
+        } else if ui
+            .button(format!("{} Detect Letterbox", icons::SEARCH))
+            .clicked()
+        {
             self.scan = Some((path.to_owned(), CropScan::start(path)));
         }
 
@@ -161,7 +167,7 @@ impl Letterbox {
             // Shade what the crop removes.
             let (sw, sh) = found.result.src;
             let (sw, sh) = (sw.max(1) as f32, sh.max(1) as f32);
-            let shade = egui::Color32::from_rgba_unmultiplied(220, 40, 40, 110);
+            let shade = theme::color::DANGER.gamma_multiply(0.4);
             let r = resp.rect;
             let top = r.top() + r.height() * crop.y as f32 / sh;
             let bottom = r.top() + r.height() * (crop.y + crop.h) as f32 / sh;

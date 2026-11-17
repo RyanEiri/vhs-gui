@@ -1,3 +1,4 @@
+use crate::icons;
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::sync::mpsc::{self, SyncSender};
@@ -170,7 +171,12 @@ impl V4l2Controls {
         ui.horizontal(|ui| {
             ui.heading("Input");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if show_close && ui.small_button("◀").on_hover_text("Close panel").clicked() {
+                if show_close
+                    && ui
+                        .small_button(icons::BACK)
+                        .on_hover_text("Close panel")
+                        .clicked()
+                {
                     close_clicked = true;
                 }
                 if ui.small_button("Reset All").clicked() {
@@ -199,7 +205,7 @@ impl V4l2Controls {
                         fires.push((*cid, ctrl.value));
                     }
                     if ui
-                        .small_button("↺")
+                        .small_button(icons::RESET)
                         .on_hover_text(format!("Reset to {}", ctrl.default))
                         .clicked()
                     {
