@@ -56,6 +56,9 @@ impl App {
         // Restore remaining persisted settings; apply V4L2 preset to hardware on startup.
         saved.apply_to(&mut view_mode, &mut monitor.v4l2, &mut upscale.settings);
         view_mode = view_mode.at_startup(upscale.is_upscaling());
+        upscale
+            .library
+            .set_section_overrides(saved.library_sections.clone());
 
         let paths_work_root_input = saved.paths.work_root.clone().unwrap_or_default();
 
@@ -214,15 +217,27 @@ impl App {
             theme::Tone::Accent,
             false,
         );
-        ui.add(
-            egui::Label::new(
-                egui::RichText::new(&entry.name)
-                    .monospace()
-                    .size(11.5)
-                    .color(theme::color::TEXT_STRONG),
-            )
-            .truncate(),
-        );
+        let name = entry.name.clone();
+        let busy = self.upscale.is_busy();
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let trash = theme::danger_button(format!("{} Move to Trash…", icons::TRASH));
+            if ui
+                .add_enabled(!busy, trash)
+                .on_disabled_hover_text("Not while a job is running")
+                .clicked()
+            {
+                self.upscale.request_trash();
+            }
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(&name)
+                        .monospace()
+                        .size(11.5)
+                        .color(theme::color::TEXT_STRONG),
+                )
+                .truncate(),
+            );
+        });
     }
 
     fn upscale_toolbar(&mut self, ui: &mut egui::Ui) {
@@ -494,6 +509,7 @@ impl eframe::App for App {
                 &self.monitor.v4l2,
                 &self.upscale.settings,
                 &self.paths_work_root_input,
+                self.upscale.library.section_overrides(),
             )
             .save();
         }
@@ -574,32 +590,82 @@ impl eframe::App for App {
                     self.arm_save();
                 }
             }
-            // Library: the file list and the actions for the selected file.
+            // Library: the file list with the actions for the selected file beneath it. Three
+            // fixed regions (header, list, actions), so opening an inline panel never moves the list.
             ViewMode::Library => {
+                let mut sections_changed = false;
                 egui::Panel::left("library")
                     .resizable(true)
                     .default_size(theme::size::SIDE_PANEL_WIDTH)
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
-                            ui.heading("Library");
-                            if ui
-                                .small_button(icons::REFRESH)
-                                .on_hover_text("Refresh")
-                                .clicked()
-                            {
-                                self.upscale.refresh_library(&self.cfg);
-                            }
-                        });
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            self.upscale.show_sidebar(
-                                ui,
-                                ctx,
-                                &mut self.mpv,
-                                &self.cfg,
-                                &mut self.status,
+                            ui.label(
+                                egui::RichText::new("Library")
+                                    .family(egui::FontFamily::Name(theme::FAMILY_BOLD.into()))
+                                    .size(13.0)
+                                    .color(theme::color::TEXT_STRONG),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} files",
+                                    self.upscale.library.entries.len()
+                                ))
+                                .monospace()
+                                .size(11.0)
+                                .color(theme::color::TEXT_WEAK),
+                            );
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .add(
+                                            egui::Button::new(icons::REFRESH)
+                                                .fill(theme::color::TRANSPARENT)
+                                                .min_size(egui::vec2(24.0, 24.0)),
+                                        )
+                                        .on_hover_text("Refresh")
+                                        .clicked()
+                                    {
+                                        self.upscale.refresh_library(&self.cfg);
+                                    }
+                                },
                             );
                         });
+                        ui.add_space(2.0);
+                        if self.upscale.has_selection() {
+                            egui::Panel::bottom("library_actions")
+                                .resizable(false)
+                                .frame(
+                                    egui::Frame::new()
+                                        .fill(theme::color::BG_PANEL)
+                                        .stroke(egui::Stroke::new(
+                                            1.0_f32,
+                                            theme::color::STROKE_WIDGET,
+                                        ))
+                                        .inner_margin(egui::Margin::same(10)),
+                                )
+                                .show_inside(ui, |ui| {
+                                    self.upscale
+                                        .show_actions(ui, ctx, &self.cfg, &mut self.status);
+                                });
+                        }
+                        egui::CentralPanel::default()
+                            .frame(egui::Frame::new())
+                            .show_inside(ui, |ui| {
+                                egui::ScrollArea::vertical()
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+                                        sections_changed = self.upscale.show_list(
+                                            ui,
+                                            &mut self.mpv,
+                                            &mut self.status,
+                                        );
+                                    });
+                            });
                     });
+                if sections_changed {
+                    self.arm_save();
+                }
             }
             // Upscale: the settings panel, when the toolbar's Settings toggle is on.
             ViewMode::Upscale => {

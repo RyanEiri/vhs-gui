@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::config::Config;
 use crate::icons;
-use crate::library::{FileKind, Library};
+use crate::library::Library;
 use crate::mpv_view::{MpvView, Source};
 use crate::pipeline::PipelineJob;
 use crate::settings::{
@@ -21,6 +21,28 @@ struct UpscalePreviewTextures {
     segment_frames: u64,
 }
 
+/// The inline panel open in the Library's action region. Only one at a time; it replaces the action
+/// groups and belongs to one file (selecting another file closes it).
+enum Inline {
+    None,
+    Trash(PathBuf),
+    Rename(PathBuf, String),
+    AudioCleanup(PathBuf, crate::audio_cleanup::Params),
+    Letterbox(PathBuf),
+}
+
+impl Inline {
+    fn path(&self) -> Option<&PathBuf> {
+        match self {
+            Inline::None => None,
+            Inline::Trash(p)
+            | Inline::Rename(p, _)
+            | Inline::AudioCleanup(p, _)
+            | Inline::Letterbox(p) => Some(p),
+        }
+    }
+}
+
 pub struct UpscalePanel {
     pub library: Library,
     pub settings: UpscaleSettings,
@@ -30,10 +52,8 @@ pub struct UpscalePanel {
     /// (Denoise+QTGMC is a Denoise job with QTGMC chained after it). Taken on every completion,
     /// so a failed or cancelled job never starts the next stage.
     chain_after: Option<VsOp>,
-    confirm_delete: Option<PathBuf>,
-    rename_state: Option<(PathBuf, String)>,
-    /// File the inline Audio Cleanup panel is open for, and its params.
-    audio_cleanup_state: Option<(PathBuf, crate::audio_cleanup::Params)>,
+    /// The inline panel open in the Library's action region, if any.
+    inline: Inline,
     /// File a "Find Quiet Spot" scan is running for, and the scan itself.
     quiet_spot_scan: Option<(PathBuf, crate::audio_cleanup::QuietSpotScan)>,
     /// Letterbox detection results, applied by the Upscale and Viewer Encode buttons.
@@ -57,9 +77,7 @@ impl UpscalePanel {
             settings_panel_open: false,
             pipeline: None,
             chain_after: None,
-            confirm_delete: None,
-            rename_state: None,
-            audio_cleanup_state: None,
+            inline: Inline::None,
             quiet_spot_scan: None,
             letterbox: Default::default(),
             vs_setup_finished: false,
@@ -508,21 +526,33 @@ impl UpscalePanel {
         }
     }
 
-    /// Draw the library list + file action panel inside a caller-supplied scroll area.
-    pub fn show_sidebar(
-        &mut self,
-        ui: &mut egui::Ui,
-        ctx: &egui::Context,
-        mpv: &mut MpvView,
-        cfg: &Config,
-        status: &mut String,
-    ) {
-        if let Some(entry) = self.library.show(ui) {
+    /// Draw the file list. Opens a clicked file in the player; returns true when a section was
+    /// folded or unfolded (the caller saves the layout).
+    pub fn show_list(&mut self, ui: &mut egui::Ui, mpv: &mut MpvView, status: &mut String) -> bool {
+        let event = self.library.show(ui);
+        if let Some(entry) = event.open {
             *status = format!("Opening: {}", entry.name);
             mpv.open(&Source::File(entry.path));
         }
-        if self.library.selected_entry().is_some() {
-            self.file_actions_panel(ui, ctx, cfg, status);
+        event.sections_changed
+    }
+
+    /// Whether a file is selected (the action region is hidden otherwise).
+    pub fn has_selection(&self) -> bool {
+        self.library.selected_entry().is_some()
+    }
+
+    /// A job is running, so the file actions are locked.
+    pub fn is_busy(&self) -> bool {
+        self.pipeline.is_some()
+    }
+
+    /// The Library toolbar's Move to Trash…: open the confirmation for the selected file.
+    pub fn request_trash(&mut self) {
+        if self.pipeline.is_none()
+            && let Some(e) = self.library.selected_entry()
+        {
+            self.inline = Inline::Trash(e.path.clone());
         }
     }
 
@@ -857,538 +887,465 @@ impl UpscalePanel {
     }
 
     // -----------------------------------------------------------------------
-    // File action panel
+    // The Library's action region
     // -----------------------------------------------------------------------
 
-    fn file_actions_panel(
+    /// The action region under the file list: the groups of actions for the selected file, or one
+    /// inline panel that replaces them. Drawn by the caller in a bottom panel, so the list above
+    /// never moves.
+    pub fn show_actions(
         &mut self,
         ui: &mut egui::Ui,
         ctx: &egui::Context,
         cfg: &Config,
         status: &mut String,
     ) {
-        let entry = match self.library.selected_entry() {
-            Some(e) => e.clone(),
-            None => return,
+        let Some(entry) = self.library.selected_entry().cloned() else {
+            self.inline = Inline::None;
+            return;
         };
-
-        ui.separator();
-        ui.label(egui::RichText::new(&entry.name).small().weak());
-
-        let busy = self.pipeline.is_some()
-            || self.confirm_delete.is_some()
-            || self.rename_state.is_some()
-            || self.audio_cleanup_state.is_some();
-
-        ui.add_enabled_ui(!busy, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                match entry.kind {
-                    FileKind::Archival => {
-                        if ui.button("Denoise").clicked() {
-                            self.launch_denoise(entry.path.clone(), None, cfg, status);
-                        }
-                        if ui.button("Denoise+QTGMC").clicked() {
-                            if entry.name.ends_with("_STABLE.mkv") {
-                                // Already denoised: vhs_process.sh skipped straight to QTGMC.
-                                self.launch_vs_op(VsOp::Qtgmc, entry.path.clone(), cfg, status);
-                            } else {
-                                self.launch_denoise(
-                                    entry.path.clone(),
-                                    Some(VsOp::Qtgmc),
-                                    cfg,
-                                    status,
-                                );
-                            }
-                        }
-                    }
-                    FileKind::Stabilized => {
-                        if ui.button("QTGMC").clicked() {
-                            self.launch_vs_op(VsOp::Qtgmc, entry.path.clone(), cfg, status);
-                        }
-                        if ui.button("IVTC").clicked() {
-                            self.launch_vs_op(VsOp::Ivtc, entry.path.clone(), cfg, status);
-                        }
-                        if ui.button("IVTC+Decomb").clicked() {
-                            self.launch_vs_op(VsOp::IvtcDecombed, entry.path.clone(), cfg, status);
-                        }
-                        if ui.button("Field Align").clicked() {
-                            self.launch_vs_op(VsOp::FieldAlign, entry.path.clone(), cfg, status);
-                        }
-                        if ui.button("Fix A/V Sync").clicked() {
-                            self.launch_fix_sync(entry.path.clone(), cfg, status);
-                        }
-                    }
-                    FileKind::EditMaster => {
-                        if ui.button("VDecimate").clicked() {
-                            self.launch_vs_op(VsOp::Vdecimate, entry.path.clone(), cfg, status);
-                        }
-                        if ui.button("Viewer Encode").clicked() {
-                            self.launch_viewer_encode(entry.path.clone(), cfg, status);
-                        }
-                        if ui.button("Upscale Video").clicked() {
-                            let out = Self::upscale_output(&entry.path, cfg);
-                            self.launch_upscale(
-                                format!("Upscale Video {}", entry.name),
-                                Variant::Standard,
-                                entry.path.clone(),
-                                out,
-                                cfg,
-                                status,
-                            );
-                        }
-                        if ui.button("Upscale Video B&W").clicked() {
-                            let out = Self::upscale_output(&entry.path, cfg);
-                            self.launch_upscale(
-                                format!("Upscale Video B&W {}", entry.name),
-                                Variant::Bw,
-                                entry.path.clone(),
-                                out,
-                                cfg,
-                                status,
-                            );
-                        }
-                        if ui.button("Fix A/V Sync").clicked() {
-                            self.launch_fix_sync(entry.path.clone(), cfg, status);
-                        }
-                        if ui.button("Audio Cleanup...").clicked() {
-                            self.audio_cleanup_state =
-                                Some((entry.path.clone(), crate::audio_cleanup::Params::default()));
-                        }
-                    }
-                    FileKind::EditMasterVD => {
-                        if ui.button("Viewer Encode").clicked() {
-                            self.launch_viewer_encode(entry.path.clone(), cfg, status);
-                        }
-                        if ui.button("Upscale Film").clicked() {
-                            let out = Self::upscale_output(&entry.path, cfg);
-                            self.launch_upscale(
-                                format!("Upscale Film {}", entry.name),
-                                Variant::Standard,
-                                entry.path.clone(),
-                                out,
-                                cfg,
-                                status,
-                            );
-                        }
-                        if ui.button("Upscale Film B&W").clicked() {
-                            let out = Self::upscale_output(&entry.path, cfg);
-                            self.launch_upscale(
-                                format!("Upscale Film B&W {}", entry.name),
-                                Variant::Bw,
-                                entry.path.clone(),
-                                out,
-                                cfg,
-                                status,
-                            );
-                        }
-                        if ui.button("Upscale Anime").clicked() {
-                            let out = Self::upscale_output(&entry.path, cfg);
-                            self.launch_upscale(
-                                format!("Upscale Anime {}", entry.name),
-                                Variant::Anime,
-                                entry.path.clone(),
-                                out,
-                                cfg,
-                                status,
-                            );
-                        }
-                        if ui.button("Fix A/V Sync").clicked() {
-                            self.launch_fix_sync(entry.path.clone(), cfg, status);
-                        }
-                        if ui.button("Audio Cleanup...").clicked() {
-                            self.audio_cleanup_state =
-                                Some((entry.path.clone(), crate::audio_cleanup::Params::default()));
-                        }
-                    }
-                    FileKind::Viewer => {
-                        if ui.button("Upscale").clicked() {
-                            let out = Self::upscale_output(&entry.path, cfg);
-                            self.launch_upscale(
-                                format!("Upscale {}", entry.name),
-                                Variant::Standard,
-                                entry.path.clone(),
-                                out,
-                                cfg,
-                                status,
-                            );
-                        }
-                        if ui.button("Upscale B&W").clicked() {
-                            let out = Self::upscale_output(&entry.path, cfg);
-                            self.launch_upscale(
-                                format!("Upscale B&W {}", entry.name),
-                                Variant::Bw,
-                                entry.path.clone(),
-                                out,
-                                cfg,
-                                status,
-                            );
-                        }
-                        if ui.button("Upscale Anime").clicked() {
-                            let out = Self::upscale_output(&entry.path, cfg);
-                            self.launch_upscale(
-                                format!("Upscale Anime {}", entry.name),
-                                Variant::Anime,
-                                entry.path.clone(),
-                                out,
-                                cfg,
-                                status,
-                            );
-                        }
-                        if ui.button("Fix A/V Sync").clicked() {
-                            self.launch_fix_sync(entry.path.clone(), cfg, status);
-                        }
-                        if ui.button("Audio Cleanup...").clicked() {
-                            self.audio_cleanup_state =
-                                Some((entry.path.clone(), crate::audio_cleanup::Params::default()));
-                        }
-                    }
-                }
-
-                if matches!(entry.kind, FileKind::Viewer) && ui.button("Rename…").clicked() {
-                    let suggestion = suggest_viewer_name(&entry.path);
-                    self.rename_state = Some((entry.path.clone(), suggestion));
-                }
-                if ui.button(format!("{} Delete", icons::TRASH)).clicked() {
-                    self.confirm_delete = Some(entry.path.clone());
-                }
-            });
-        });
-
-        // Delete confirmation
-        if let Some(ref path) = self.confirm_delete.clone()
-            && path == &entry.path
-        {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Move to Trash?").color(theme::color::DANGER));
-                if ui.button(format!("{} Yes", icons::OK)).clicked() {
-                    if let Err(e) = trash::delete(path) {
-                        *status = format!("Trash failed: {e}");
-                    } else {
-                        *status = format!("Trashed {}", entry.name);
-                    }
-                    self.confirm_delete = None;
-                    self.library.refresh(cfg);
-                }
-                if ui.button(format!("{} No", icons::CANCEL)).clicked() {
-                    self.confirm_delete = None;
-                }
-            });
+        // An inline panel belongs to one file: selecting another closes it.
+        if self.inline.path().is_some_and(|p| p != &entry.path) {
+            self.inline = Inline::None;
         }
-
-        if matches!(entry.kind, FileKind::EditMaster | FileKind::EditMasterVD) {
-            self.letterbox.show(ui, ctx, &entry.path, status);
-        }
-
-        // Rename UI (two-pass borrow pattern)
-        let rename_action: Option<Result<String, ()>> =
-            if let Some((ref orig, ref mut edit)) = self.rename_state {
-                if orig == &entry.path {
-                    ui.separator();
-                    ui.label(egui::RichText::new("Rename to:").small().weak());
-                    ui.add(
-                        egui::TextEdit::singleline(edit)
-                            .desired_width(f32::INFINITY)
-                            .hint_text("filename.mkv"),
-                    );
-                    let mut action = None;
-                    ui.horizontal(|ui| {
-                        if ui.button(format!("{} OK", icons::OK)).clicked() {
-                            action = Some(Ok(edit.clone()));
-                        }
-                        if ui.button(format!("{} Cancel", icons::CANCEL)).clicked() {
-                            action = Some(Err(()));
-                        }
-                    });
-                    action
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-        match rename_action {
-            Some(Ok(new_name)) => {
-                self.rename_state = None;
-                let new_name = new_name.trim().to_owned();
-                if !new_name.is_empty() {
-                    let new_name = if new_name.ends_with(".mkv") {
-                        new_name
-                    } else {
-                        format!("{new_name}.mkv")
-                    };
-                    let new_path = entry
-                        .path
-                        .parent()
-                        .unwrap_or_else(|| std::path::Path::new("."))
-                        .join(&new_name);
-                    if new_path.exists() {
-                        *status = format!("Rename failed: {new_name} already exists");
-                    } else {
-                        match std::fs::rename(&entry.path, &new_path) {
-                            Ok(()) => {
-                                *status = format!("Renamed to {new_name}");
-                                self.library.refresh(cfg);
-                                // Keep the renamed file selected so the action
-                                // panel (and Rename button) doesn't disappear —
-                                // otherwise a second rename requires re-clicking
-                                // the row first.
-                                self.library.selected =
-                                    self.library.entries.iter().position(|e| e.path == new_path);
-                            }
-                            Err(e) => *status = format!("Rename failed: {e}"),
-                        }
-                    }
-                }
-            }
-            Some(Err(())) => {
-                self.rename_state = None;
-            }
-            None => {}
-        }
-
-        // Audio Cleanup UI (two-pass borrow pattern, same shape as Rename)
-        let audio_cleanup_action: Option<Result<crate::audio_cleanup::Params, ()>> =
-            if let Some((ref orig, ref mut params)) = self.audio_cleanup_state {
-                if orig == &entry.path {
-                    ui.separator();
-                    ui.label(egui::RichText::new("Audio Cleanup").small().weak());
-                    egui::Grid::new("audio_cleanup_grid")
-                        .num_columns(2)
-                        .spacing([8.0, 4.0])
-                        .show(ui, |ui| {
-                            ui.label("Noise sample start (s)");
-                            ui.add(
-                                egui::DragValue::new(&mut params.noise_start_secs)
-                                    .range(0.0..=f64::MAX)
-                                    .speed(0.1),
-                            );
-                            ui.end_row();
-
-                            ui.label("Noise sample length (s)");
-                            ui.add(
-                                egui::DragValue::new(&mut params.noise_len_secs)
-                                    .range(0.1..=10.0)
-                                    .speed(0.1),
-                            );
-                            ui.end_row();
-
-                            ui.label("Noise reduction amount");
-                            ui.add(
-                                egui::DragValue::new(&mut params.nr_amount)
-                                    .range(0.0..=1.0)
-                                    .speed(0.01),
-                            );
-                            ui.end_row();
-
-                            ui.label("Hum notch (60Hz)");
-                            ui.checkbox(&mut params.hum_enable, "");
-                            ui.end_row();
-
-                            ui.label("Loudness target (LUFS)");
-                            ui.add(
-                                egui::DragValue::new(&mut params.loudnorm_target_i)
-                                    .range(-30.0..=-6.0)
-                                    .speed(0.5)
-                                    .suffix(" LUFS"),
-                            );
-                            ui.end_row();
-                        });
-
-                    // "Find Quiet Spot": scans the file with ffmpeg
-                    // silencedetect and auto-fills the two fields above,
-                    // instead of the user hand-scanning timestamps.
-                    let scan_running = self
-                        .quiet_spot_scan
-                        .as_ref()
-                        .is_some_and(|(p, _)| p == &entry.path);
-                    if scan_running {
-                        let (_, scan) = self.quiet_spot_scan.as_ref().unwrap();
-                        match scan.poll() {
-                            None => {
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        egui::RichText::new(format!(
-                                            "{} Scanning... {}",
-                                            icons::SEARCH,
-                                            scan.elapsed_str()
-                                        ))
-                                        .small()
-                                        .weak(),
-                                    );
-                                    if ui.small_button("Cancel").clicked() {
-                                        scan.cancel();
-                                    }
-                                });
-                                ctx.request_repaint_after(std::time::Duration::from_secs(1));
-                            }
-                            Some(result) => {
-                                self.quiet_spot_scan = None;
-                                match result {
-                                    Ok(Some(spot)) => {
-                                        params.noise_start_secs = spot.start_secs;
-                                        params.noise_len_secs = spot.len_secs;
-                                        let m = (spot.start_secs / 60.0) as u64;
-                                        let s = spot.start_secs % 60.0;
-                                        *status = format!(
-                                            "Found quiet spot: {m}:{s:04.1} \
-                                             ({:.1}s stretch, {:.1}dB) -- filled in above",
-                                            spot.gap_secs, spot.rms_db
-                                        );
-                                    }
-                                    Ok(None) => {
-                                        *status = "No quiet stretch found (tried -35dB) \
-                                                    -- try a different noise start manually."
-                                            .to_string();
-                                    }
-                                    Err(e) => {
-                                        *status = format!("Quiet-spot scan failed: {e}");
-                                    }
-                                }
-                            }
-                        }
-                    } else if ui
-                        .button(format!("{} Find Quiet Spot", icons::SEARCH))
-                        .clicked()
-                    {
-                        self.quiet_spot_scan = Some((
-                            entry.path.clone(),
-                            crate::audio_cleanup::QuietSpotScan::start(&entry.path),
-                        ));
-                    }
-
-                    ui.label(
-                        egui::RichText::new(
-                            "Tip: point the sample start at an actual quiet spot on this \
-                             tape -- a wrong window (e.g. dialogue starting at 0:00) makes \
-                             cleanup worse, not better. Loudness target is perceived \
-                             loudness (not peak) -- -16 LUFS suits spoken word, try -20 \
-                             for wider-dynamic-range music.",
-                        )
-                        .small()
-                        .weak(),
-                    );
-                    let mut action = None;
-                    ui.horizontal(|ui| {
-                        if ui.button(format!("{} Run", icons::PLAY)).clicked() {
-                            action = Some(Ok(params.clone()));
-                        }
-                        if ui.button(format!("{} Cancel", icons::CANCEL)).clicked() {
-                            action = Some(Err(()));
-                        }
-                    });
-                    action
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-        match audio_cleanup_action {
-            Some(Ok(params)) => {
-                self.audio_cleanup_state = None;
-                self.launch_audio_cleanup(entry.path.clone(), &params, cfg, status);
-            }
-            Some(Err(())) => {
-                self.audio_cleanup_state = None;
-            }
-            None => {}
-        }
-
-        // Running job progress
-        let (do_toggle_pause, do_stop_after_seg, do_cancel) = if let Some(ref job) = self.pipeline {
-            ui.separator();
-            ui.label(
-                egui::RichText::new(format!("● {}", job.label))
-                    .color(theme::color::SUCCESS)
-                    .small(),
-            );
-
-            let pulse = {
-                let t = ctx.input(|i| i.time);
-                ((t * 0.4).sin() * 0.5 + 0.5) as f32
-            };
-
-            if job.is_upscale {
-                let total_fill = job.total_progress().unwrap_or(0.0);
-                ui.label(
-                    egui::RichText::new(format!(
-                        "Total  {}/{} segments",
-                        job.completed_segments, job.total_segments
-                    ))
-                    .small(),
-                );
-                ui.add(egui::ProgressBar::new(total_fill).animate(false));
-
-                let seg_fill = job.segment_progress().unwrap_or(pulse);
-                ui.label(egui::RichText::new("Segment").small());
-                ui.add(egui::ProgressBar::new(seg_fill).animate(true));
-            } else {
-                let fill = job.progress().unwrap_or(pulse);
-                ui.add(egui::ProgressBar::new(fill).animate(true));
-            }
-
-            // A start_native_sequence job (e.g. Audio Cleanup) has no single
-            // ffmpeg progress stream — frame/time numbers below would be
-            // stale/meaningless leftovers from whichever substage happened
-            // to log last, so show its current stage label instead.
-            let frame_txt = if let Some(stage) = job.stage_text() {
-                format!("{stage}  {}", job.elapsed_str())
-            } else if job.is_upscale {
-                format!(
-                    "frame {} / {}  {}",
-                    job.upscaled_frames,
-                    job.segment_frames,
-                    job.elapsed_str()
-                )
-            } else if job.total_frames > 0 {
-                format!(
-                    "frame {} / {}  {}",
-                    job.current_frame,
-                    job.total_frames,
-                    job.elapsed_str()
-                )
-            } else {
-                format!("frame {}  {}", job.current_frame, job.elapsed_str())
-            };
-            ui.label(egui::RichText::new(frame_txt).small());
-
-            let mut toggle_pause = false;
-            let mut stop_after = false;
-            let mut cancel = false;
-            ui.horizontal(|ui| {
-                if job.is_upscale {
-                    let pause_label = if job.paused { "Resume" } else { "Pause" };
-                    if ui.button(pause_label).clicked() {
-                        toggle_pause = true;
-                    }
-                    if job.stopping_after_segment() {
-                        ui.label(egui::RichText::new("Stopping…").weak().small());
-                    } else if ui.button("Stop after Segment").clicked() {
-                        stop_after = true;
-                    }
-                }
-                if ui.button("Cancel").clicked() {
-                    cancel = true;
-                }
-            });
-
-            ctx.request_repaint_after(std::time::Duration::from_secs(1));
-            (toggle_pause, stop_after, cancel)
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+        if matches!(self.inline, Inline::None) {
+            self.show_action_groups(ui, &entry, cfg, status);
         } else {
-            (false, false, false)
-        };
+            self.show_inline(ui, ctx, &entry, cfg, status);
+        }
+    }
 
-        if do_toggle_pause && let Some(ref mut job) = self.pipeline {
-            job.toggle_pause();
+    fn show_action_groups(
+        &mut self,
+        ui: &mut egui::Ui,
+        entry: &crate::library::LibraryEntry,
+        cfg: &Config,
+        status: &mut String,
+    ) {
+        let busy = self.pipeline.is_some();
+        if let Some(job) = &self.pipeline {
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} Actions return when {} ends",
+                    icons::TIME,
+                    job.label
+                ))
+                .size(11.0)
+                .color(theme::color::WARNING),
+            );
         }
-        if do_stop_after_seg && let Some(ref mut job) = self.pipeline {
-            job.request_stop_after_segment();
+        let groups = super::actions::groups(&entry.kind);
+        let picked = ui
+            .add_enabled_ui(!busy, |ui| {
+                ui.spacing_mut().item_spacing.y = 6.0;
+                super::actions::show_groups(ui, &groups)
+            })
+            .inner;
+
+        // A crop already found for this file: one line that reopens the panel.
+        if let Some(crop) = self.letterbox.crop_for(&entry.path) {
+            let line = egui::RichText::new(format!(
+                "{} {}x{} · crop on",
+                icons::LETTERBOX,
+                crop.w,
+                crop.h
+            ))
+            .monospace()
+            .size(11.0)
+            .color(theme::color::ACCENT);
+            if ui
+                .add(egui::Label::new(line).sense(egui::Sense::click()))
+                .clicked()
+            {
+                self.inline = Inline::Letterbox(entry.path.clone());
+            }
         }
-        if do_cancel && let Some(ref job) = self.pipeline {
-            job.cancel();
+
+        if let Some(id) = picked {
+            self.run_action(id, entry, cfg, status);
         }
+    }
+
+    /// Start (or open the panel for) the chosen action. Every launch is the call the old buttons
+    /// made, with the same job label.
+    fn run_action(
+        &mut self,
+        id: super::actions::ActionId,
+        entry: &crate::library::LibraryEntry,
+        cfg: &Config,
+        status: &mut String,
+    ) {
+        use super::actions::ActionId as A;
+        let path = entry.path.clone();
+        match id {
+            A::Denoise => self.launch_denoise(path, None, cfg, status),
+            A::DenoiseQtgmc => {
+                if entry.name.ends_with("_STABLE.mkv") {
+                    // Already denoised: vhs_process.sh skipped straight to QTGMC.
+                    self.launch_vs_op(VsOp::Qtgmc, path, cfg, status);
+                } else {
+                    self.launch_denoise(path, Some(VsOp::Qtgmc), cfg, status);
+                }
+            }
+            A::Qtgmc => self.launch_vs_op(VsOp::Qtgmc, path, cfg, status),
+            A::Ivtc => self.launch_vs_op(VsOp::Ivtc, path, cfg, status),
+            A::IvtcDecomb => self.launch_vs_op(VsOp::IvtcDecombed, path, cfg, status),
+            A::FieldAlign => self.launch_vs_op(VsOp::FieldAlign, path, cfg, status),
+            A::Vdecimate => self.launch_vs_op(VsOp::Vdecimate, path, cfg, status),
+            A::FixSync => self.launch_fix_sync(path, cfg, status),
+            A::ViewerEncode => self.launch_viewer_encode(path, cfg, status),
+            A::Upscale(variant, verb) => {
+                let out = Self::upscale_output(&path, cfg);
+                self.launch_upscale(
+                    format!("{verb} {}", entry.name),
+                    variant,
+                    path,
+                    out,
+                    cfg,
+                    status,
+                );
+            }
+            A::DetectLetterbox => {
+                self.letterbox.start_if_needed(&path);
+                self.inline = Inline::Letterbox(path);
+            }
+            A::AudioCleanup => {
+                self.inline = Inline::AudioCleanup(path, crate::audio_cleanup::Params::default());
+            }
+            A::Rename => {
+                let suggestion = suggest_viewer_name(&path);
+                self.inline = Inline::Rename(path, suggestion);
+            }
+        }
+    }
+
+    fn file_name_line(ui: &mut egui::Ui, name: &str) {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(name)
+                    .monospace()
+                    .size(10.5)
+                    .color(theme::color::TEXT_NORMAL),
+            )
+            .wrap_mode(egui::TextWrapMode::Wrap),
+        );
+    }
+
+    fn show_inline(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        entry: &crate::library::LibraryEntry,
+        cfg: &Config,
+        status: &mut String,
+    ) {
+        // Take the panel out so its state can be edited while `self` is used for the actions.
+        let mut inline = std::mem::replace(&mut self.inline, Inline::None);
+        let keep = match &mut inline {
+            Inline::None => false,
+            Inline::Trash(path) => self.trash_panel(ui, path, entry, cfg, status),
+            Inline::Rename(_, edit) => self.rename_panel(ui, edit, entry, cfg, status),
+            Inline::AudioCleanup(_, params) => {
+                self.audio_cleanup_panel(ui, ctx, params, entry, cfg, status)
+            }
+            Inline::Letterbox(path) => {
+                let done = self.letterbox.show_panel(ui, ctx, path, status);
+                !done
+            }
+        };
+        if keep {
+            self.inline = inline;
+        }
+    }
+
+    /// Move to Trash?: No (first, takes focus) and Yes, move it. Returns true to stay open.
+    fn trash_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        path: &std::path::Path,
+        entry: &crate::library::LibraryEntry,
+        cfg: &Config,
+        status: &mut String,
+    ) -> bool {
+        if super::actions::inline_header(ui, "Move to Trash?", theme::color::DANGER) {
+            return false;
+        }
+        Self::file_name_line(ui, &entry.name);
+        ui.label(
+            egui::RichText::new("The file goes to the desktop trash.")
+                .size(11.5)
+                .color(theme::color::TEXT_WEAK),
+        );
+        let (mut no, mut yes) = (false, false);
+        ui.columns(2, |cols| {
+            let keep = cols[0].add_sized(
+                [cols[0].available_width(), theme::size::CONTROL_HEIGHT + 2.0],
+                egui::Button::new("No"),
+            );
+            if !keep.has_focus() {
+                keep.request_focus();
+            }
+            no = keep.clicked() || cols[0].input(|i| i.key_pressed(egui::Key::Escape));
+            cols[1].spacing_mut().button_padding.x = 4.0;
+            let trash = theme::danger_solid_button(format!("{} Yes, move it", icons::TRASH))
+                .wrap_mode(egui::TextWrapMode::Truncate);
+            yes = cols[1]
+                .add_sized(
+                    [cols[1].available_width(), theme::size::CONTROL_HEIGHT + 2.0],
+                    trash,
+                )
+                .clicked();
+        });
+        if yes {
+            if let Err(e) = trash::delete(path) {
+                *status = format!("Trash failed: {e}");
+            } else {
+                *status = format!("Trashed {}", entry.name);
+            }
+            self.library.refresh(cfg);
+            return false;
+        }
+        !no
+    }
+
+    /// Rename (Viewer files): the field is pre-filled from `suggest_viewer_name`.
+    fn rename_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        edit: &mut String,
+        entry: &crate::library::LibraryEntry,
+        cfg: &Config,
+        status: &mut String,
+    ) -> bool {
+        if super::actions::inline_header(ui, "Rename", theme::color::TEXT_STRONG) {
+            return false;
+        }
+        Self::file_name_line(ui, &entry.name);
+        ui.label(
+            egui::RichText::new("Rename to:")
+                .size(11.5)
+                .color(theme::color::TEXT_WEAK),
+        );
+        ui.add(
+            egui::TextEdit::singleline(edit)
+                .desired_width(f32::INFINITY)
+                .hint_text("filename.mkv"),
+        );
+        let (mut ok, mut cancel) = (false, false);
+        ui.columns(2, |cols| {
+            ok = cols[0]
+                .add_sized(
+                    [cols[0].available_width(), theme::size::CONTROL_HEIGHT + 2.0],
+                    theme::primary_button("OK"),
+                )
+                .clicked();
+            cancel = cols[1]
+                .add_sized(
+                    [cols[1].available_width(), theme::size::CONTROL_HEIGHT + 2.0],
+                    egui::Button::new("Cancel"),
+                )
+                .clicked();
+        });
+        if cancel {
+            return false;
+        }
+        if ok {
+            let new_name = edit.trim().to_owned();
+            if !new_name.is_empty() {
+                let new_name = if new_name.ends_with(".mkv") {
+                    new_name
+                } else {
+                    format!("{new_name}.mkv")
+                };
+                let new_path = entry
+                    .path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."))
+                    .join(&new_name);
+                if new_path.exists() {
+                    *status = format!("Rename failed: {new_name} already exists");
+                } else {
+                    match std::fs::rename(&entry.path, &new_path) {
+                        Ok(()) => {
+                            *status = format!("Renamed to {new_name}");
+                            self.library.refresh(cfg);
+                            // Keep the renamed file selected so its actions stay in view.
+                            self.library.selected =
+                                self.library.entries.iter().position(|e| e.path == new_path);
+                        }
+                        Err(e) => *status = format!("Rename failed: {e}"),
+                    }
+                }
+            }
+            return false;
+        }
+        true
+    }
+
+    /// Audio Cleanup: the form, with Find Quiet Spot directly under the two fields it fills.
+    fn audio_cleanup_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &egui::Context,
+        params: &mut crate::audio_cleanup::Params,
+        entry: &crate::library::LibraryEntry,
+        cfg: &Config,
+        status: &mut String,
+    ) -> bool {
+        if super::actions::inline_header(ui, "Audio Cleanup", theme::color::TEXT_STRONG) {
+            return false;
+        }
+        // Compact: smaller text and tighter rows, so the form does not widen the side panel.
+        ui.style_mut().override_font_id =
+            Some(egui::FontId::new(11.5, egui::FontFamily::Proportional));
+        ui.spacing_mut().item_spacing.y = 4.0;
+        let field = |ui: &mut egui::Ui, drag: egui::DragValue<'_>| {
+            ui.scope(|ui| {
+                ui.spacing_mut().interact_size.x = 62.0;
+                ui.add(drag)
+            });
+        };
+        egui::Grid::new("audio_cleanup_sample")
+            .num_columns(2)
+            .spacing([6.0, 3.0])
+            .show(ui, |ui| {
+                ui.label("Noise sample start (s)");
+                field(
+                    ui,
+                    egui::DragValue::new(&mut params.noise_start_secs)
+                        .range(0.0..=f64::MAX)
+                        .speed(0.1),
+                );
+                ui.end_row();
+                ui.label("Noise sample length (s)");
+                field(
+                    ui,
+                    egui::DragValue::new(&mut params.noise_len_secs)
+                        .range(0.1..=10.0)
+                        .speed(0.1),
+                );
+                ui.end_row();
+            });
+
+        // "Find Quiet Spot": scans the file with ffmpeg silencedetect and fills the two fields
+        // above, instead of the user hand-scanning timestamps.
+        let scan_running = self
+            .quiet_spot_scan
+            .as_ref()
+            .is_some_and(|(p, _)| p == &entry.path);
+        if scan_running {
+            let (_, scan) = self.quiet_spot_scan.as_ref().unwrap();
+            match scan.poll() {
+                None => {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new().size(14.0).color(theme::color::ACCENT));
+                        ui.label(
+                            egui::RichText::new(format!("Scanning… {}", scan.elapsed_str()))
+                                .size(11.5)
+                                .color(theme::color::TEXT_WEAK),
+                        );
+                        if ui.button("Cancel").clicked() {
+                            scan.cancel();
+                        }
+                    });
+                    ctx.request_repaint_after(std::time::Duration::from_secs(1));
+                }
+                Some(result) => {
+                    self.quiet_spot_scan = None;
+                    match result {
+                        Ok(Some(spot)) => {
+                            params.noise_start_secs = spot.start_secs;
+                            params.noise_len_secs = spot.len_secs;
+                            let m = (spot.start_secs / 60.0) as u64;
+                            let s = spot.start_secs % 60.0;
+                            *status = format!(
+                                "Found quiet spot: {m}:{s:04.1} \
+                                 ({:.1}s stretch, {:.1}dB) -- filled in above",
+                                spot.gap_secs, spot.rms_db
+                            );
+                        }
+                        Ok(None) => {
+                            *status = "No quiet stretch found (tried -35dB) \
+                                       -- try a different noise start manually."
+                                .to_string();
+                        }
+                        Err(e) => *status = format!("Quiet-spot scan failed: {e}"),
+                    }
+                }
+            }
+        } else {
+            let find = egui::Button::new(format!("{} Find Quiet Spot", icons::SEARCH));
+            if ui
+                .add_sized([ui.available_width(), theme::size::CONTROL_HEIGHT], find)
+                .clicked()
+            {
+                self.quiet_spot_scan = Some((
+                    entry.path.clone(),
+                    crate::audio_cleanup::QuietSpotScan::start(&entry.path),
+                ));
+            }
+        }
+
+        egui::Grid::new("audio_cleanup_rest")
+            .num_columns(2)
+            .spacing([6.0, 3.0])
+            .show(ui, |ui| {
+                ui.label("Noise reduction amount");
+                field(
+                    ui,
+                    egui::DragValue::new(&mut params.nr_amount)
+                        .range(0.0..=1.0)
+                        .speed(0.01),
+                );
+                ui.end_row();
+                ui.label("Hum notch (60Hz)");
+                ui.checkbox(&mut params.hum_enable, "");
+                ui.end_row();
+                ui.label("Loudness target (LUFS)");
+                field(
+                    ui,
+                    egui::DragValue::new(&mut params.loudnorm_target_i)
+                        .range(-30.0..=-6.0)
+                        .speed(0.5),
+                );
+                ui.end_row();
+            });
+        ui.label(
+            egui::RichText::new("-16 suits spoken word; try -20 for wider-range music.")
+                .size(10.5)
+                .color(theme::color::TEXT_WEAK),
+        );
+        ui.label(
+            egui::RichText::new(format!(
+                "{} Point the sample at a real quiet spot on this tape. A wrong window makes \
+                 cleanup worse.",
+                icons::WARNING
+            ))
+            .size(10.5)
+            .color(theme::color::WARNING),
+        );
+
+        let (mut run, mut cancel) = (false, false);
+        ui.columns(2, |cols| {
+            run = cols[0]
+                .add_sized(
+                    [cols[0].available_width(), theme::size::CONTROL_HEIGHT + 2.0],
+                    theme::primary_button(format!("{} Run", icons::PLAY)),
+                )
+                .clicked();
+            cancel = cols[1]
+                .add_sized(
+                    [cols[1].available_width(), theme::size::CONTROL_HEIGHT + 2.0],
+                    egui::Button::new("Cancel"),
+                )
+                .clicked();
+        });
+        if run {
+            self.launch_audio_cleanup(entry.path.clone(), params, cfg, status);
+            return false;
+        }
+        !cancel
     }
 }
 

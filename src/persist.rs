@@ -76,6 +76,8 @@ pub struct AppSettings {
     pub v4l2: BTreeMap<String, i32>,
     pub upscale: PersistedUpscaleSettings,
     pub paths: PersistedPaths,
+    /// Library sections the user opened or closed by hand, by name.
+    pub library_sections: BTreeMap<String, bool>,
 }
 
 impl AppSettings {
@@ -150,6 +152,7 @@ impl AppSettings {
         v4l2: &V4l2Controls,
         upscale: &UpscaleSettings,
         work_root_input: &str,
+        library_sections: &BTreeMap<String, bool>,
     ) -> Self {
         fn non_empty(s: &str) -> Option<String> {
             let t = s.trim();
@@ -177,6 +180,7 @@ impl AppSettings {
             paths: PersistedPaths {
                 work_root: non_empty(work_root_input),
             },
+            library_sections: library_sections.clone(),
         }
     }
 }
@@ -218,10 +222,26 @@ mod tests {
     }
 
     #[test]
+    fn library_sections_round_trip_and_older_files_load_without_them() {
+        let sections =
+            BTreeMap::from([("Viewer".to_owned(), true), ("Archival".to_owned(), false)]);
+        let settings = AppSettings {
+            library_sections: sections.clone(),
+            ..Default::default()
+        };
+        let back: AppSettings =
+            toml::from_str(&toml::to_string_pretty(&settings).unwrap()).unwrap();
+        assert_eq!(back.library_sections, sections);
+        let old: AppSettings = toml::from_str("mode = \"monitor\"\n").unwrap();
+        assert!(old.library_sections.is_empty());
+    }
+
+    #[test]
     fn capture_from_blank_input_yields_none() {
         let v4l2 = V4l2Controls::new("/dev/video0");
         let upscale = UpscaleSettings::default();
-        let settings = AppSettings::capture_from(&ViewMode::Monitor, &v4l2, &upscale, "  ");
+        let settings =
+            AppSettings::capture_from(&ViewMode::Monitor, &v4l2, &upscale, "  ", &BTreeMap::new());
         assert!(settings.paths.work_root.is_none());
     }
 }

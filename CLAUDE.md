@@ -92,6 +92,17 @@ DISPLAY=:0 ./target/debug/vhs-gui
   (`launch_pipeline`/`launch_upscale`), upscale settings panel, before/after preview.
 - **`src/library.rs`** — categorizes files into Viewer / EditMasterVD / EditMaster /
   Stabilized / Archival by directory + filename pattern (no probing).
+  It also draws the list (redesign phase 4): a folding header per section with a count (a section the
+  user opened or closed is saved in the settings; otherwise only the section holding the selection is
+  open) and 24 px rows with the section's prefix dropped and the middle of long names elided
+  (`elide_middle`; the full name is the hover text and shows in the toolbar).
+- **`src/panels/actions.rs`** — what each file category offers, as data (`groups`): titled groups with a
+  recommended next step (a filled button, or two outlined ones for an Edit Master, none for Stabilized),
+  plus the drawing (`show_groups`, the two-line next-step button, `inline_header`). A test keeps every
+  pre-redesign action present. `UpscalePanel::run_action` maps an `ActionId` to the same launch calls
+  as before. The action region sits in a bottom panel under the list and shows either the groups or one
+  inline panel (`Inline`: Trash, Rename, Audio Cleanup, Letterbox) that replaces them; Move to Trash… is
+  in the Library toolbar.
 - **`src/v4l2.rs`** — the native-Rust precedent to imitate for future ports: raw
   `libc::ioctl` (`VIDIOC_G_CTRL`/`VIDIOC_S_CTRL`), no subprocess, fd owned by a
   dedicated background thread reached via a bounded channel so the UI thread never
