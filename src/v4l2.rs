@@ -177,15 +177,22 @@ impl V4l2Controls {
             .id_salt(("v4l2_input", collapsed_by_default))
             .default_open(!collapsed_by_default)
             .show(ui, |ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let b = egui::Button::new(egui::RichText::new("Reset All").size(11.0))
-                        .fill(theme::color::TRANSPARENT)
-                        .stroke(egui::Stroke::NONE);
-                    if ui.add(b).clicked() {
-                        reset_all = true;
-                    }
+                // A right-to-left layout fills the height it is given, so it needs its own row.
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let b = egui::Button::new(egui::RichText::new("Reset All").size(11.0))
+                            .fill(theme::color::TRANSPARENT)
+                            .stroke(egui::Stroke::NONE);
+                        if ui.add(b).clicked() {
+                            reset_all = true;
+                        }
+                    });
                 });
+                // Compact rows, so all four controls fit beside the Session block at the minimum size.
                 ui.spacing_mut().slider_rail_height = 4.0;
+                ui.spacing_mut().item_spacing.y = 3.0;
+                ui.spacing_mut().interact_size.y = 20.0;
+                ui.spacing_mut().button_padding = egui::vec2(2.0, 0.0);
                 for (i, (ctrl, (_, _, _, _, _, cid))) in
                     self.ctrls.iter_mut().zip(DEFAULTS).enumerate()
                 {

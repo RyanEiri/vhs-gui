@@ -554,7 +554,7 @@ impl eframe::App for App {
                     .show(ctx, |ui| {
                         egui::ScrollArea::vertical()
                             .show(ui, |ui| {
-                                ui.spacing_mut().item_spacing.y = 10.0;
+                                ui.spacing_mut().item_spacing.y = 6.0;
                                 refresh = self.monitor.show_session(
                                     ui,
                                     &mut self.mpv,
