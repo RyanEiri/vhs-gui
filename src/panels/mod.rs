@@ -1,3 +1,4 @@
+pub mod actions;
 pub mod letterbox;
 pub mod monitor;
 pub mod status_bar;

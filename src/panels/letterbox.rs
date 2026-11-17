@@ -51,36 +51,44 @@ impl Letterbox {
         self.found.get(path).filter(|f| f.enabled)?.crop()
     }
 
-    pub fn show(
+    /// Begin detecting for `path` unless it already has a result or a scan is running.
+    pub fn start_if_needed(&mut self, path: &Path) {
+        if self.scan.is_none() && !self.found.contains_key(path) {
+            self.scan = Some((path.to_owned(), CropScan::start(path)));
+        }
+    }
+
+    /// The inline Letterbox panel: detecting, or the result with its preview and the crop choice.
+    /// Returns true when Back was pressed.
+    pub fn show_panel(
         &mut self,
         ui: &mut egui::Ui,
         ctx: &egui::Context,
         path: &Path,
         status: &mut String,
-    ) {
-        ui.separator();
-        ui.label(egui::RichText::new("Letterbox").small().weak());
+    ) -> bool {
+        if super::actions::inline_header(ui, "Letterbox", theme::color::TEXT_STRONG) {
+            return true;
+        }
 
         if matches!(&self.scan, Some((p, _)) if p == path) {
             match self.scan.as_ref().and_then(|(_, s)| s.poll()) {
                 None => {
                     if let Some((_, scan)) = &self.scan {
                         ui.horizontal(|ui| {
+                            ui.add(egui::Spinner::new().size(14.0).color(theme::color::ACCENT));
                             ui.label(
-                                egui::RichText::new(format!(
-                                    "{} Detecting... {}",
-                                    icons::SEARCH,
-                                    scan.elapsed_str()
-                                ))
-                                .small()
-                                .weak(),
+                                egui::RichText::new(format!("Detecting… {}", scan.elapsed_str()))
+                                    .size(11.5)
+                                    .color(theme::color::TEXT_WEAK),
                             );
-                            if ui.small_button("Cancel").clicked() {
+                            if ui.button("Cancel").clicked() {
                                 scan.cancel();
                             }
                         });
                     }
                     ctx.request_repaint_after(std::time::Duration::from_millis(500));
+                    return false;
                 }
                 Some(outcome) => {
                     self.scan = None;
@@ -93,14 +101,20 @@ impl Letterbox {
                     }
                 }
             }
-        } else if ui
-            .button(format!("{} Detect Letterbox", icons::SEARCH))
-            .clicked()
-        {
-            self.scan = Some((path.to_owned(), CropScan::start(path)));
         }
 
         self.show_result(ui, path);
+        if self.scan.is_none() {
+            let again = egui::Button::new(format!("{} Detect again", icons::SEARCH));
+            if ui
+                .add_sized([ui.available_width(), theme::size::CONTROL_HEIGHT], again)
+                .clicked()
+            {
+                self.found.remove(path);
+                self.scan = Some((path.to_owned(), CropScan::start(path)));
+            }
+        }
+        false
     }
 
     fn finish(
@@ -133,7 +147,39 @@ impl Letterbox {
             return;
         };
         let decision = found.decision();
-        ui.label(egui::RichText::new(describe(&decision)).small());
+        match &decision {
+            CropDecision::Crop {
+                crop,
+                agree,
+                usable,
+            } => {
+                ui.label(
+                    egui::RichText::new(format!("{}x{} from line {}", crop.w, crop.h, crop.y))
+                        .family(egui::FontFamily::Name(theme::FAMILY_MONO_BOLD.into()))
+                        .size(12.0)
+                        .color(theme::color::TEXT_STRONG),
+                );
+                ui.label(
+                    egui::RichText::new(format!("{agree} of {usable} samples agree"))
+                        .size(11.5)
+                        .color(theme::color::TEXT_WEAK),
+                );
+            }
+            CropDecision::Mixed { .. } => {
+                ui.label(
+                    egui::RichText::new(format!("{} {}", icons::WARNING, describe(&decision)))
+                        .size(11.5)
+                        .color(theme::color::WARNING),
+                );
+            }
+            _ => {
+                ui.label(
+                    egui::RichText::new(describe(&decision))
+                        .size(11.5)
+                        .color(theme::color::TEXT_NORMAL),
+                );
+            }
+        }
 
         let Some(crop) = found.crop() else {
             // Nothing to apply; keep the mixed result visible so it can be checked.
@@ -160,7 +206,7 @@ impl Letterbox {
         });
 
         if let Some(tex) = &found.texture {
-            let width = ui.available_width().min(360.0);
+            let width = ui.available_width().min(210.0);
             let size = tex.size_vec2();
             let height = width * size.y / size.x.max(1.0);
             let resp = ui.add(egui::Image::new((tex.id(), egui::vec2(width, height))));

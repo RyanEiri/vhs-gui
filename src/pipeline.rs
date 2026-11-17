@@ -33,8 +33,6 @@ pub struct PipelineJob {
     /// Most recent `frame=` value from ffmpeg progress output.
     pub current_frame: u64,
     /// Input frame count (display only).  May differ from output count for
-    /// frame-rate-changing ops (VDecimate, QTGMC).  Not used for progress %.
-    pub total_frames: u64,
     /// Most recent `time=` parsed from ffmpeg progress, in seconds.
     pub current_time_secs: f64,
     /// Input duration in seconds (from ffprobe).  Used as the denominator for
@@ -267,7 +265,6 @@ fn parse_segment_secs(run_config: &str) -> Option<u32> {
 /// constructor needs to build its own `Command`(s) and the base `Self`.
 struct SpawnPrep {
     label_str: String,
-    total_frames: u64,
     total_duration_secs: f64,
     log_path: PathBuf,
     log_file: fs::File,
@@ -280,7 +277,7 @@ fn prepare_spawn(
     log_dir: &Path,
 ) -> anyhow::Result<SpawnPrep> {
     // Probe input video info before spawning (fast: reads container header).
-    let (total_frames, total_duration_secs) = probe_video_info(input);
+    let (_, total_duration_secs) = probe_video_info(input);
 
     let label_str: String = label.into();
 
@@ -327,7 +324,6 @@ fn prepare_spawn(
 
     Ok(SpawnPrep {
         label_str,
-        total_frames,
         total_duration_secs,
         log_path,
         log_file,
@@ -345,7 +341,6 @@ fn base_job(prep: SpawnPrep, child: Child, aux_child: Option<Child>, pgid: Pid) 
         label: prep.label_str,
         done: false,
         current_frame: 0,
-        total_frames: prep.total_frames,
         current_time_secs: 0.0,
         total_duration_secs: prep.total_duration_secs,
         script_log: Some(prep.log_path),
@@ -450,7 +445,7 @@ impl PipelineJob {
         output_path: PathBuf,
         segment_secs: u32,
     ) -> Self {
-        let (total_frames, total_duration_secs) = probe_video_info(input);
+        let (_, total_duration_secs) = probe_video_info(input);
         let frames_dir = segments_dir.parent().map(|d| d.join("frames"));
         let frames_up_dir = segments_dir.parent().map(|d| d.join("frames_up"));
         let total_segments = if total_duration_secs > 0.0 && segment_secs > 0 {
@@ -466,7 +461,6 @@ impl PipelineJob {
             label: label.into(),
             done: false,
             current_frame: 0,
-            total_frames,
             current_time_secs: 0.0,
             total_duration_secs,
             script_log: None,
@@ -589,7 +583,6 @@ impl PipelineJob {
             label: prep.label_str,
             done: false,
             current_frame: 0,
-            total_frames: 0,
             current_time_secs: 0.0,
             // Forced to 0 (not `prep.total_duration_secs`): a multi-stage
             // sequence has no single ffmpeg progress stream to divide by a
