@@ -34,12 +34,14 @@ Comment: The binary embeds the fonts and icon crate below. They are third-party 
 Files: assets/fonts/Inter-*.ttf
 Copyright: 2016 The Inter Project Authors
 License: OFL-1.1
- Inter 4.1, SIL Open Font License 1.1: /usr/share/doc/vhs-gui/licenses/Inter-OFL.txt
+ Inter 4.1 with its Private Use Area character mappings removed (no Reserved Font Name is declared),
+ SIL Open Font License 1.1: /usr/share/doc/vhs-gui/licenses/Inter-OFL.txt
 
 Files: assets/fonts/JetBrainsMono-*.ttf
 Copyright: 2020 The JetBrains Mono Project Authors
 License: OFL-1.1
- JetBrains Mono 2.304, SIL Open Font License 1.1: /usr/share/doc/vhs-gui/licenses/JetBrainsMono-OFL.txt
+ JetBrains Mono 2.304 with its Private Use Area character mappings removed (no Reserved Font
+ Name is declared), SIL Open Font License 1.1: /usr/share/doc/vhs-gui/licenses/JetBrainsMono-OFL.txt
 
 Files: the Phosphor icon font from the egui-phosphor crate
 Copyright: 2020 Phosphor Icons; 2023 Romet Tagobert (egui-phosphor)

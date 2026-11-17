@@ -266,12 +266,20 @@ impl MpvView {
     // Show the video panel in egui.
     // -----------------------------------------------------------------------
     pub fn show(&self, ui: &mut egui::Ui, capture_osd: Option<&str>) {
-        // Determine available space, keep 4:3 aspect
+        // The picture is 4:3: as large as fits, never cropped or stretched, top-aligned and
+        // centred across the panel.
         let available = ui.available_size();
-        let w = available.x;
-        let h = (w * 3.0 / 4.0).min(available.y);
-        let size = egui::vec2(w, h);
-        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+        let (w, h) = if available.x * 3.0 / 4.0 <= available.y {
+            (available.x, available.x * 3.0 / 4.0)
+        } else {
+            (available.y * 4.0 / 3.0, available.y)
+        };
+        let size = egui::vec2(w.max(1.0), h.max(1.0));
+        let (rect, response) = ui
+            .vertical_centered(|ui| ui.allocate_exact_size(size, egui::Sense::click()))
+            .inner;
+        ui.painter()
+            .rect_filled(rect, 0.0, crate::theme::color::VIDEO_BLACK);
 
         // Click toggles pause for file playback; live sources (V4L2) don't pause.
         let is_live = self
@@ -326,6 +334,12 @@ impl MpvView {
         });
 
         let painter = ui.painter();
+        painter.rect_stroke(
+            rect,
+            0.0,
+            egui::Stroke::new(1.0_f32, crate::theme::color::STROKE_SUBTLE),
+            egui::StrokeKind::Inside,
+        );
 
         // OSD — time played / remaining, overlaid at bottom of video.
         // Gate on source-is-file (not duration) so it appears even if mpv hasn't

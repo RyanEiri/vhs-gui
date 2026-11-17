@@ -592,11 +592,7 @@ impl eframe::App for App {
                     None
                 };
                 self.mpv.show(ui, cap_osd.as_deref());
-                if self.mpv.state.duration > 0.0 {
-                    let pos = format_time(self.mpv.state.time_pos);
-                    let dur = format_time(self.mpv.state.duration);
-                    ui.label(format!("{pos} / {dur}"));
-                } else if self.mpv.state.idle {
+                if self.mpv.state.idle && self.mpv.state.duration <= 0.0 {
                     ui.centered_and_justified(|ui| {
                         ui.label(
                             egui::RichText::new(
@@ -634,18 +630,6 @@ impl eframe::App for App {
         }
         // The monitor feed holds the grabber and records nothing: it must not outlive the GUI.
         self.monitor.feed.kill();
-    }
-}
-
-fn format_time(secs: f64) -> String {
-    let s = secs as u64;
-    let h = s / 3600;
-    let m = (s % 3600) / 60;
-    let sc = s % 60;
-    if h > 0 {
-        format!("{h}:{m:02}:{sc:02}")
-    } else {
-        format!("{m}:{sc:02}")
     }
 }
 
