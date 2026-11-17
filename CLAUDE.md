@@ -145,8 +145,8 @@ DISPLAY=:0 ./target/debug/vhs-gui
   handoff): colours by role (`theme::color::*`), sizes, text styles, button/badge/progress helpers, and the
   Phosphor icon constants. `install_fonts(bundled_fonts())` and `apply` run once in `App::new`. Panels use
   these, never a literal `Color32` or an emoji glyph; a test (`theme::tests`) scans `app.rs`, `v4l2.rs`,
-  `library.rs` and `panels/` for them (`mpv_view.rs` draws its own on-video display and is exempt). Both
-  modules carry `#[allow(dead_code)]` in `main.rs` until the last redesign phase uses everything.
+  `library.rs` and `panels/` for them (`mpv_view.rs` draws its own on-video display and is exempt).
+- **`src/panels/notice.rs`** — what an ended job leaves behind: a red banner above the status bar for a failure (names the job, whose label carries the file, and its log path or, for a reattached job, the log folder; Open log via `xdg-open`; stays until dismissed) and an 8 s toast with Show for a success. `UpscalePanel::poll` reports the ended job via `take_finished`; `Notices::push`/`expire` are pure and tested. A job that fails to *start* still only reaches the status line.
 - **`src/vs_setup.rs`** — the Tools window's "Set up VapourSynth": a five-step `SeqStep` job (create a venv
   in `~/.local/share/vhs-gui/vapoursynth`, `pip install --require-hashes --only-binary=:all: --no-deps`
   from `assets/vs/requirements.txt`, download `havsfunc.py` at a pinned commit and sha256, `vapoursynth

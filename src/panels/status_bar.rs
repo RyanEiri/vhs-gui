@@ -317,7 +317,7 @@ fn status_line(ui: &mut egui::Ui, status: &str) {
         return;
     }
     // Right-to-left: the text first so it is the rightmost, then its check on its left.
-    let ok = status.ends_with("finished");
+    let ok = status.contains(" finished");
     ui.add(
         egui::Label::new(
             egui::RichText::new(status)

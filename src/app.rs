@@ -7,6 +7,7 @@ use crate::config::Config;
 use crate::mpv_view::MpvView;
 use crate::panels::ViewMode;
 use crate::panels::monitor::{CaptureState, MonitorPanel};
+use crate::panels::notice::{self, Notices};
 use crate::panels::status_bar::StatusBar;
 use crate::panels::tools::ToolsPanel;
 use crate::panels::upscale::UpscalePanel;
@@ -33,6 +34,9 @@ pub struct App {
     /// means "no override" — see `AppSettings::capture_from`.
     paths_work_root_input: String,
     status_bar: StatusBar,
+    notices: Notices,
+    about_banner: Option<egui::TextureHandle>,
+    about_icon: Option<egui::TextureHandle>,
 }
 
 impl App {
@@ -75,6 +79,9 @@ impl App {
             paths_open: false,
             paths_work_root_input,
             status_bar: StatusBar::default(),
+            notices: Notices::default(),
+            about_banner: None,
+            about_icon: None,
         })
     }
 
@@ -367,6 +374,71 @@ impl App {
         view_changed
     }
 
+    /// The failure banner and the success toast, in two panels stacked above the status bar.
+    // egui 0.34: no non-deprecated top-level Panel::show; revisit on egui upgrade.
+    #[allow(deprecated)]
+    fn show_notices(&mut self, ctx: &egui::Context) {
+        if let Some(toast) = &self.notices.toast {
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+            let can_show = toast.output.is_some();
+            let mut show = false;
+            let mut dismiss = false;
+            egui::Panel::bottom("toast")
+                .exact_size(28.0)
+                .resizable(false)
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme::color::SUCCESS_DIM)
+                        .inner_margin(egui::Margin::symmetric(12, 0)),
+                )
+                .show(ctx, |ui| {
+                    ui.horizontal_centered(|ui| {
+                        show = notice::show_toast(ui, toast, can_show);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            dismiss = ui.small_button(icons::CANCEL).clicked();
+                        });
+                    });
+                });
+            let output = toast.output.clone();
+            if show {
+                if let Some(p) = output {
+                    self.upscale.select_path(&p);
+                    self.view_mode = ViewMode::Library;
+                    self.arm_save();
+                }
+                self.notices.toast = None;
+            } else if dismiss {
+                self.notices.toast = None;
+            }
+        }
+        if let Some(failure) = &self.notices.failure {
+            let (mut open, mut dismiss) = (false, false);
+            egui::Panel::bottom("failure")
+                .exact_size(50.0)
+                .resizable(false)
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme::color::DANGER_DIM)
+                        .stroke(egui::Stroke::new(1.0_f32, theme::color::DANGER))
+                        .inner_margin(egui::Margin::symmetric(12, 0)),
+                )
+                .show(ctx, |ui| {
+                    ui.horizontal_centered(|ui| {
+                        (open, dismiss) = notice::show_banner(ui, failure);
+                    });
+                });
+            if open {
+                // The log folder or file, in the desktop's own viewer.
+                let _ = std::process::Command::new("xdg-open")
+                    .arg(&failure.log)
+                    .spawn();
+            }
+            if dismiss {
+                self.notices.failure = None;
+            }
+        }
+    }
+
     fn show_about_window(&mut self, ctx: &egui::Context) {
         let exe = std::env::current_exe()
             .map(|p| p.display().to_string())
@@ -377,32 +449,86 @@ impl App {
             "release"
         };
 
+        let banner = self.about_banner(ctx);
+        let frame = window_frame(ctx);
         egui::Window::new("About vhs-gui")
             .open(&mut self.about_open)
             .resizable(false)
             .collapsible(false)
+            .frame(frame)
             .show(ctx, |ui| {
-                egui::Grid::new("about_grid")
-                    .num_columns(2)
-                    .spacing([12.0, 6.0])
-                    .show(ui, |ui| {
-                        ui.label("Version:");
-                        ui.label(VERSION);
-                        ui.end_row();
-
-                        ui.label("Commit:");
-                        ui.label(format!("{GIT_BRANCH}@{GIT_HASH}{GIT_DIRTY}"));
-                        ui.end_row();
-
-                        ui.label("Build:");
-                        ui.label(profile);
-                        ui.end_row();
-
-                        ui.label("Running from:");
-                        ui.label(exe);
-                        ui.end_row();
+                ui.set_width(400.0);
+                if let Some(tex) = &banner {
+                    let w = ui.available_width();
+                    let h = w * tex.size_vec2().y / tex.size_vec2().x;
+                    ui.add(
+                        egui::Image::new(egui::load::SizedTexture::from_handle(tex))
+                            .fit_to_exact_size(egui::vec2(w, h))
+                            .corner_radius(egui::CornerRadius::same(theme::size::RADIUS_WIDGET)),
+                    );
+                }
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if let Some(icon) = &self.about_icon {
+                        ui.add(
+                            egui::Image::new(egui::load::SizedTexture::from_handle(icon))
+                                .fit_to_exact_size(egui::vec2(44.0, 44.0)),
+                        );
+                    }
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 1.0;
+                        ui.heading("vhs-gui");
+                        ui.label(
+                            egui::RichText::new("GPL-3.0")
+                                .size(11.5)
+                                .color(theme::color::TEXT_WEAK),
+                        );
                     });
+                });
+                ui.add_space(8.0);
+                let commit = format!("{GIT_BRANCH}@{GIT_HASH}{GIT_DIRTY}");
+                for (label, value) in [
+                    ("Version", VERSION),
+                    ("Commit", commit.as_str()),
+                    ("Build", profile),
+                    ("Running from", exe.as_str()),
+                ] {
+                    ui.horizontal_top(|ui| {
+                        ui.add_sized(
+                            egui::vec2(96.0, 18.0),
+                            egui::Label::new(
+                                egui::RichText::new(label)
+                                    .size(11.5)
+                                    .color(theme::color::TEXT_WEAK),
+                            ),
+                        );
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(value)
+                                    .monospace()
+                                    .size(11.5)
+                                    .color(theme::color::TEXT_NORMAL),
+                            )
+                            .wrap(),
+                        );
+                    });
+                }
             });
+    }
+
+    /// The banner and the icon as textures, decoded the first time About opens.
+    fn about_banner(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
+        if self.about_icon.is_none() {
+            let icon = png_to_color_image(include_bytes!("../assets/icon.png"))?;
+            self.about_icon =
+                Some(ctx.load_texture("about_icon", icon, egui::TextureOptions::LINEAR));
+        }
+        if self.about_banner.is_none() {
+            let img = png_to_color_image(include_bytes!("../assets/banner.png"))?;
+            self.about_banner =
+                Some(ctx.load_texture("about_banner", img, egui::TextureOptions::LINEAR));
+        }
+        self.about_banner.clone()
     }
 
     /// Videos directory (data root) is deliberately not editable here:
@@ -413,35 +539,35 @@ impl App {
     /// button click, no restart needed.
     fn show_paths_window(&mut self, ctx: &egui::Context) {
         let mut changed = false;
+        let frame = window_frame(ctx);
         egui::Window::new("Working Directories")
             .open(&mut self.paths_open)
             .resizable(false)
             .collapsible(false)
+            .frame(frame)
             .show(ctx, |ui| {
+                ui.set_width(440.0);
+                ui.spacing_mut().item_spacing.y = 6.0;
                 ui.label(
                     egui::RichText::new("Leave a field blank to use its env var / default.")
-                        .weak()
-                        .small(),
+                        .size(11.5)
+                        .color(theme::color::TEXT_WEAK),
                 );
-                ui.add_space(6.0);
-                egui::Grid::new("paths_grid")
-                    .num_columns(2)
-                    .spacing([10.0, 8.0])
-                    .show(ui, |ui| {
-                        ui.label("Upscale work root:");
-                        changed |= path_field(
-                            ui,
-                            &mut self.paths_work_root_input,
-                            &Config::default_work_root(),
-                        );
-                        ui.end_row();
+                ui.add_space(4.0);
+                ui.label("Upscale work root:");
+                changed |= path_field(
+                    ui,
+                    &mut self.paths_work_root_input,
+                    &Config::default_work_root(),
+                );
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Reset to default").clicked() {
+                            self.paths_work_root_input.clear();
+                            changed = true;
+                        }
                     });
-
-                ui.add_space(6.0);
-                if ui.button("Reset to default").clicked() {
-                    self.paths_work_root_input.clear();
-                    changed = true;
-                }
+                });
             });
 
         if changed {
@@ -455,33 +581,29 @@ impl App {
     }
 }
 
-/// A path text field with an existence indicator and a hint showing the
+/// A path text field with a "not found" line when the folder is missing and a hint showing the
 /// resolved default when left blank. Returns true if the field changed.
 fn path_field(ui: &mut egui::Ui, buf: &mut String, default: &std::path::Path) -> bool {
-    let mut changed = false;
-    ui.horizontal(|ui| {
-        let resp = ui.add(
-            egui::TextEdit::singleline(buf)
-                .desired_width(320.0)
-                .hint_text(default.to_string_lossy()),
+    let resp = ui.add(
+        egui::TextEdit::singleline(buf)
+            .font(egui::TextStyle::Monospace)
+            .desired_width(f32::INFINITY)
+            .hint_text(default.to_string_lossy()),
+    );
+    let effective = if buf.trim().is_empty() {
+        default.to_path_buf()
+    } else {
+        PathBuf::from(buf.trim())
+    };
+    if !effective.is_dir() {
+        ui.label(
+            egui::RichText::new(format!("{} not found", icons::WARNING))
+                .family(egui::FontFamily::Name(theme::FAMILY_BOLD.into()))
+                .size(11.5)
+                .color(theme::color::WARNING),
         );
-        changed = resp.changed();
-        let effective = if buf.trim().is_empty() {
-            default.to_path_buf()
-        } else {
-            PathBuf::from(buf.trim())
-        };
-        if effective.is_dir() {
-            ui.label(egui::RichText::new(icons::OK).color(theme::color::SUCCESS));
-        } else {
-            ui.label(
-                egui::RichText::new(format!("{} not found", icons::WARNING))
-                    .color(theme::color::WARNING)
-                    .small(),
-            );
-        }
-    });
-    changed
+    }
+    resp.changed()
 }
 
 impl eframe::App for App {
@@ -527,6 +649,11 @@ impl eframe::App for App {
 
         // 4. Poll upscale/pipeline job (keeps running even when Monitor view is active).
         self.upscale.poll(ctx, &self.cfg, &mut self.status);
+        if let Some(done) = self.upscale.take_finished() {
+            self.notices
+                .push(done, &self.cfg.log_dir(), std::time::Instant::now());
+        }
+        self.notices.expire(std::time::Instant::now());
 
         // 5. Build UI. The status bar goes first so it spans the full width, then the rail, the
         // toolbar, the side panels and the central area.
@@ -538,6 +665,8 @@ impl eframe::App for App {
             &mut self.tools,
             &mut self.status,
         );
+
+        self.show_notices(ctx);
 
         if self.show_rail(ctx) {
             self.arm_save();
@@ -782,4 +911,28 @@ fn show_no_upscale(ui: &mut egui::Ui) -> bool {
             .clicked();
     });
     go
+}
+
+/// The look of the floating windows: raised panel, widget stroke, 6 px corners.
+fn window_frame(ctx: &egui::Context) -> egui::Frame {
+    egui::Frame::new()
+        .fill(theme::color::BG_RAISED)
+        .stroke(egui::Stroke::new(1.0_f32, theme::color::STROKE_WIDGET))
+        .corner_radius(egui::CornerRadius::same(theme::size::RADIUS_WINDOW))
+        .shadow(ctx.global_style().visuals.window_shadow)
+        .inner_margin(egui::Margin::same(12))
+}
+
+/// Decode an embedded PNG (RGB or RGBA) into an egui image; `None` if it is anything else.
+fn png_to_color_image(bytes: &[u8]) -> Option<egui::ColorImage> {
+    let mut reader = png::Decoder::new(bytes).read_info().ok()?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).ok()?;
+    let data = &buf[..info.buffer_size()];
+    let size = [info.width as usize, info.height as usize];
+    match info.color_type {
+        png::ColorType::Rgba => Some(egui::ColorImage::from_rgba_unmultiplied(size, data)),
+        png::ColorType::Rgb => Some(egui::ColorImage::from_rgb(size, data)),
+        _ => None,
+    }
 }
