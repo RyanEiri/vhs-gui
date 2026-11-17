@@ -8,6 +8,8 @@ anyhow = "1.0.102"
 crossbeam-channel = "0.5.15"
 eframe = { version = "0.34.2", features = ["glow", "wayland", "x11"] }
 egui = "0.34.2"
+# 0.12 is the release built against egui 0.34 (0.13 needs 0.35, 0.14 needs 0.36).
+egui-phosphor = "0.12"
 egui_glow = "0.34.2"
 glow = "0.17"
 libc = "0.2.186"

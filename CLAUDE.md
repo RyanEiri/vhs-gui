@@ -121,6 +121,12 @@ DISPLAY=:0 ./target/debug/vhs-gui
   programs; the ignored golden test compares the engine with the real script, and
   `tests/upscale_equivalence.rs` (ignored, needs the GPU) compares real outputs. Read
   `docs/upscale-engine-design.md` before changing any of it.
+- **`src/theme.rs`** + **`src/icons.rs`** + **`assets/fonts/`** — the redesign's tokens (from the Claude Design
+  handoff): colours by role (`theme::color::*`), sizes, text styles, button/badge/progress helpers, and the
+  Phosphor icon constants. `install_fonts(bundled_fonts())` and `apply` run once in `App::new`. Panels use
+  these, never a literal `Color32` or an emoji glyph; a test (`theme::tests`) scans `app.rs`, `v4l2.rs`,
+  `library.rs` and `panels/` for them (`mpv_view.rs` draws its own on-video display and is exempt). Both
+  modules carry `#[allow(dead_code)]` in `main.rs` until the last redesign phase uses everything.
 - **`src/vs_setup.rs`** — the Tools window's "Set up VapourSynth": a five-step `SeqStep` job (create a venv
   in `~/.local/share/vhs-gui/vapoursynth`, `pip install --require-hashes --only-binary=:all: --no-deps`
   from `assets/vs/requirements.txt`, download `havsfunc.py` at a pinned commit and sha256, `vapoursynth

@@ -1,3 +1,5 @@
+use crate::icons;
+use crate::theme;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -37,6 +39,9 @@ impl App {
         // into cfg from the start, rather than applied after the fact.
         let saved = AppSettings::load();
         let cfg = Config::from_paths(&saved.paths);
+
+        theme::install_fonts(&cc.egui_ctx, theme::bundled_fonts());
+        theme::apply(&cc.egui_ctx);
 
         let mut mpv = MpvView::new(cc)?;
         mpv.wire_repaint(cc.egui_ctx.clone());
@@ -89,7 +94,7 @@ impl App {
 
                     if self.monitor.state != CaptureState::Capturing
                         && ui
-                            .button(if self.mpv.state.paused { "▶" } else { "⏸" })
+                            .button(if self.mpv.state.paused { icons::PLAY } else { icons::PAUSE })
                             .clicked()
                     {
                         self.mpv.toggle_pause();
@@ -113,13 +118,14 @@ impl App {
                         ui.separator();
                         let summary = if job.total_segments > 0 {
                             format!(
-                                "⬆ {}/{} segs  {}",
+                                "{} {}/{} segs  {}",
+                                icons::UPSCALE,
                                 job.completed_segments,
                                 job.total_segments,
                                 job.elapsed_str(),
                             )
                         } else {
-                            format!("⬆ {}", job.elapsed_str())
+                            format!("{} {}", icons::UPSCALE, job.elapsed_str())
                         };
                         ui.label(egui::RichText::new(summary).small().weak());
                     }
@@ -133,8 +139,8 @@ impl App {
                 ui.label(egui::RichText::new(&self.status).weak().small());
                 let problems = self.tools.problems();
                 if !problems.is_empty() {
-                    let warn = egui::RichText::new(format!("⚠ {} tool problem(s)", problems.len()))
-                        .color(egui::Color32::YELLOW)
+                    let warn = egui::RichText::new(format!("{} {} tool problem(s)", icons::WARNING, problems.len()))
+                        .color(theme::color::WARNING)
                         .small();
                     if ui
                         .add(egui::Button::new(warn).frame(false))
@@ -159,8 +165,10 @@ impl App {
             .show(ctx, |ui| {
                 ui.add_space(6.0);
                 ui.vertical_centered(|ui| {
-                    let mon_sel =
-                        egui::Button::selectable(self.view_mode == ViewMode::Monitor, "⏺");
+                    let mon_sel = egui::Button::selectable(
+                        self.view_mode == ViewMode::Monitor,
+                        icons::CAPTURE,
+                    );
                     if ui.add(mon_sel).on_hover_text("Monitor").clicked()
                         && self.view_mode != ViewMode::Monitor
                     {
@@ -168,7 +176,10 @@ impl App {
                         view_changed = true;
                     }
                     ui.add_space(4.0);
-                    let up_sel = egui::Button::selectable(self.view_mode == ViewMode::Upscale, "⬆");
+                    let up_sel = egui::Button::selectable(
+                        self.view_mode == ViewMode::Upscale,
+                        icons::UPSCALE,
+                    );
                     if ui.add(up_sel).on_hover_text("Upscale").clicked()
                         && self.view_mode != ViewMode::Upscale
                     {
@@ -182,14 +193,19 @@ impl App {
                     ui.add_space(4.0);
                     match self.view_mode {
                         ViewMode::Monitor => {
-                            let sel = egui::Button::selectable(self.monitor.input_panel_open, "⚙");
+                            let sel = egui::Button::selectable(
+                                self.monitor.input_panel_open,
+                                icons::SETTINGS,
+                            );
                             if ui.add(sel).on_hover_text("Input Settings").clicked() {
                                 self.monitor.input_panel_open = !self.monitor.input_panel_open;
                             }
                         }
                         ViewMode::Upscale => {
-                            let sel =
-                                egui::Button::selectable(self.upscale.settings_panel_open, "⚙");
+                            let sel = egui::Button::selectable(
+                                self.upscale.settings_panel_open,
+                                icons::SETTINGS,
+                            );
                             if ui.add(sel).on_hover_text("Upscale Settings").clicked() {
                                 self.upscale.settings_panel_open =
                                     !self.upscale.settings_panel_open;
@@ -200,7 +216,7 @@ impl App {
                     ui.add_space(8.0);
                     ui.separator();
                     ui.add_space(4.0);
-                    let paths_sel = egui::Button::selectable(self.paths_open, "📁");
+                    let paths_sel = egui::Button::selectable(self.paths_open, icons::FOLDERS);
                     if ui
                         .add(paths_sel)
                         .on_hover_text("Working Directories")
@@ -212,7 +228,7 @@ impl App {
                     ui.add_space(8.0);
                     ui.separator();
                     ui.add_space(4.0);
-                    let tools_sel = egui::Button::selectable(self.tools.open, "🔧");
+                    let tools_sel = egui::Button::selectable(self.tools.open, icons::TOOLS);
                     if ui.add(tools_sel).on_hover_text("Tools").clicked() {
                         self.tools.open = !self.tools.open;
                     }
@@ -220,7 +236,7 @@ impl App {
                     ui.add_space(8.0);
                     ui.separator();
                     ui.add_space(4.0);
-                    let about_sel = egui::Button::selectable(self.about_open, "ℹ");
+                    let about_sel = egui::Button::selectable(self.about_open, icons::ABOUT);
                     if ui.add(about_sel).on_hover_text("About").clicked() {
                         self.about_open = !self.about_open;
                     }
@@ -334,11 +350,11 @@ fn path_field(ui: &mut egui::Ui, buf: &mut String, default: &std::path::Path) ->
             PathBuf::from(buf.trim())
         };
         if effective.is_dir() {
-            ui.label(egui::RichText::new("✓").color(egui::Color32::GREEN));
+            ui.label(egui::RichText::new(icons::OK).color(theme::color::SUCCESS));
         } else {
             ui.label(
-                egui::RichText::new("⚠ not found")
-                    .color(egui::Color32::YELLOW)
+                egui::RichText::new(format!("{} not found", icons::WARNING))
+                    .color(theme::color::WARNING)
                     .small(),
             );
         }
@@ -450,7 +466,11 @@ impl eframe::App for App {
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.heading("Library");
-                        if ui.small_button("⟳").on_hover_text("Refresh").clicked() {
+                        if ui
+                            .small_button(icons::REFRESH)
+                            .on_hover_text("Refresh")
+                            .clicked()
+                        {
                             self.upscale.refresh_library(&self.cfg);
                         }
                     });

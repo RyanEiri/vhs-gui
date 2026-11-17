@@ -1,12 +1,14 @@
 use std::path::PathBuf;
 
 use crate::config::Config;
+use crate::icons;
 use crate::library::{FileKind, Library};
 use crate::mpv_view::{MpvView, Source};
 use crate::pipeline::PipelineJob;
 use crate::settings::{
     Backend, BrightnessPreset, CrushPreset, UpscaleSettings, preset_models_dirs,
 };
+use crate::theme;
 use crate::upscale::plan::Variant;
 use crate::vs_ops::VsOp;
 
@@ -72,7 +74,11 @@ impl UpscalePanel {
         ui.horizontal(|ui| {
             ui.heading("Upscale Settings");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("◀").on_hover_text("Close panel").clicked() {
+                if ui
+                    .small_button(icons::BACK)
+                    .on_hover_text("Close panel")
+                    .clicked()
+                {
                     self.settings_panel_open = false;
                 }
             });
@@ -127,7 +133,7 @@ impl UpscalePanel {
                                 );
                             });
                         if ui
-                            .small_button("⟳")
+                            .small_button(icons::REFRESH)
                             .on_hover_text("Rescan models")
                             .clicked()
                             || self.settings.models_dir_idx != prev_idx
@@ -424,9 +430,9 @@ impl UpscalePanel {
 
         // Pause / Resume.
         let (pause_label, pause_tip) = if job.paused {
-            ("▶", "Resume")
+            (icons::PLAY, "Resume")
         } else {
-            ("⏸", "Pause")
+            (icons::PAUSE, "Pause")
         };
         if ui.button(pause_label).on_hover_text(pause_tip).clicked() {
             job.toggle_pause();
@@ -1101,7 +1107,7 @@ impl UpscalePanel {
                     let suggestion = suggest_viewer_name(&entry.path);
                     self.rename_state = Some((entry.path.clone(), suggestion));
                 }
-                if ui.button("🗑 Delete").clicked() {
+                if ui.button(format!("{} Delete", icons::TRASH)).clicked() {
                     self.confirm_delete = Some(entry.path.clone());
                 }
             });
@@ -1112,8 +1118,8 @@ impl UpscalePanel {
             && path == &entry.path
         {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Move to Trash?").color(egui::Color32::RED));
-                if ui.button("✓ Yes").clicked() {
+                ui.label(egui::RichText::new("Move to Trash?").color(theme::color::DANGER));
+                if ui.button(format!("{} Yes", icons::OK)).clicked() {
                     if let Err(e) = trash::delete(path) {
                         *status = format!("Trash failed: {e}");
                     } else {
@@ -1122,7 +1128,7 @@ impl UpscalePanel {
                     self.confirm_delete = None;
                     self.library.refresh(cfg);
                 }
-                if ui.button("✗ No").clicked() {
+                if ui.button(format!("{} No", icons::CANCEL)).clicked() {
                     self.confirm_delete = None;
                 }
             });
@@ -1145,10 +1151,10 @@ impl UpscalePanel {
                     );
                     let mut action = None;
                     ui.horizontal(|ui| {
-                        if ui.button("✓ OK").clicked() {
+                        if ui.button(format!("{} OK", icons::OK)).clicked() {
                             action = Some(Ok(edit.clone()));
                         }
-                        if ui.button("✗ Cancel").clicked() {
+                        if ui.button(format!("{} Cancel", icons::CANCEL)).clicked() {
                             action = Some(Err(()));
                         }
                     });
@@ -1262,7 +1268,8 @@ impl UpscalePanel {
                                 ui.horizontal(|ui| {
                                     ui.label(
                                         egui::RichText::new(format!(
-                                            "🔍 Scanning... {}",
+                                            "{} Scanning... {}",
+                                            icons::SEARCH,
                                             scan.elapsed_str()
                                         ))
                                         .small()
@@ -1299,7 +1306,10 @@ impl UpscalePanel {
                                 }
                             }
                         }
-                    } else if ui.button("🔍 Find Quiet Spot").clicked() {
+                    } else if ui
+                        .button(format!("{} Find Quiet Spot", icons::SEARCH))
+                        .clicked()
+                    {
                         self.quiet_spot_scan = Some((
                             entry.path.clone(),
                             crate::audio_cleanup::QuietSpotScan::start(&entry.path),
@@ -1319,10 +1329,10 @@ impl UpscalePanel {
                     );
                     let mut action = None;
                     ui.horizontal(|ui| {
-                        if ui.button("▶ Run").clicked() {
+                        if ui.button(format!("{} Run", icons::PLAY)).clicked() {
                             action = Some(Ok(params.clone()));
                         }
-                        if ui.button("✗ Cancel").clicked() {
+                        if ui.button(format!("{} Cancel", icons::CANCEL)).clicked() {
                             action = Some(Err(()));
                         }
                     });
@@ -1350,7 +1360,7 @@ impl UpscalePanel {
             ui.separator();
             ui.label(
                 egui::RichText::new(format!("● {}", job.label))
-                    .color(egui::Color32::from_rgb(80, 200, 80))
+                    .color(theme::color::SUCCESS)
                     .small(),
             );
 

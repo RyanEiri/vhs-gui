@@ -26,3 +26,23 @@ License: LGPL-2.1
  The licence text is in /usr/share/doc/vhs-gui/licenses/vs-miscfilters-LICENSE.
  Built with the VapourSynth headers (LGPL-2.1), from the sources pinned in
  /usr/share/doc/vhs-gui/vs-plugins-REVISIONS.
+
+Files: usr/bin/vhs-gui
+Comment: The binary embeds the fonts and icon crate below. They are third-party works under their own
+ licences; the texts are in /usr/share/doc/vhs-gui/licenses/.
+
+Files: assets/fonts/Inter-*.ttf
+Copyright: 2016 The Inter Project Authors
+License: OFL-1.1
+ Inter 4.1, SIL Open Font License 1.1: /usr/share/doc/vhs-gui/licenses/Inter-OFL.txt
+
+Files: assets/fonts/JetBrainsMono-*.ttf
+Copyright: 2020 The JetBrains Mono Project Authors
+License: OFL-1.1
+ JetBrains Mono 2.304, SIL Open Font License 1.1: /usr/share/doc/vhs-gui/licenses/JetBrainsMono-OFL.txt
+
+Files: the Phosphor icon font from the egui-phosphor crate
+Copyright: 2020 Phosphor Icons; 2023 Romet Tagobert (egui-phosphor)
+License: MIT
+ /usr/share/doc/vhs-gui/licenses/Phosphor-Icons-LICENSE and
+ /usr/share/doc/vhs-gui/licenses/egui-phosphor-LICENSE-MIT
