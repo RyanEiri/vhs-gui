@@ -55,6 +55,21 @@ pub struct PlaybackState {
     pub duration: f64,
     pub paused: bool,
     pub idle: bool,
+    /// mpv's display aspect ratio of the loaded video (`video-params/aspect`), 0.0 when unknown.
+    pub video_aspect: f64,
+}
+
+/// The shape the picture is shown in. The player's frame buffer is 720x480 and mpv stretches the
+/// video over all of it (`keepaspect=no`), so what the viewer sees is decided here: 4:3 for a live
+/// capture and for a 720x480 NTSC frame (whose pixels are not square, so mpv's 3:2 is wrong),
+/// otherwise the video's own display aspect, so a letterboxed or 16:9 file is not squeezed.
+pub fn display_aspect(live: bool, reported: f64) -> f32 {
+    const NTSC_SQUARE_PIXEL_GUESS: std::ops::RangeInclusive<f64> = 1.45..=1.55;
+    if live || reported <= 0.0 || NTSC_SQUARE_PIXEL_GUESS.contains(&reported) {
+        4.0 / 3.0
+    } else {
+        reported.clamp(0.5, 3.5) as f32
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -96,6 +111,8 @@ impl MpvView {
         // --- Set low-latency defaults (can be overridden per-source) ---
         let _ = mpv.set_property("cache", "no");
         let _ = mpv.set_property("audio", "no"); // preview is video-only
+        // Fill the whole frame buffer with the video; `show` sizes the rectangle to its aspect.
+        let _ = mpv.set_property("keepaspect", "no");
 
         // --- GL resources ---
         let (fbo, fbo_id, tex) = unsafe { create_fbo(gl, 720, 480) };
@@ -134,6 +151,7 @@ impl MpvView {
         let _ = mpv.observe_property("duration", libmpv2::Format::Double, 1);
         let _ = mpv.observe_property("pause", libmpv2::Format::Flag, 2);
         let _ = mpv.observe_property("idle-active", libmpv2::Format::Flag, 3);
+        let _ = mpv.observe_property("video-params/aspect", libmpv2::Format::Double, 4);
 
         let shared_state = Arc::new(Mutex::new(PlaybackState::default()));
 
@@ -174,6 +192,9 @@ impl MpvView {
                                 ("time-pos", PropertyData::Double(v)) => s.time_pos = v,
                                 ("duration", PropertyData::Double(v)) => s.duration = v,
                                 ("pause", PropertyData::Flag(v)) => s.paused = v,
+                                ("video-params/aspect", PropertyData::Double(v)) => {
+                                    s.video_aspect = v
+                                }
                                 ("idle-active", PropertyData::Flag(v)) => {
                                     s.idle = v;
                                     repaint_ctx.request_repaint();
@@ -266,13 +287,19 @@ impl MpvView {
     // Show the video panel in egui.
     // -----------------------------------------------------------------------
     pub fn show(&self, ui: &mut egui::Ui, capture_osd: Option<&str>) {
-        // The picture is 4:3: as large as fits, never cropped or stretched, top-aligned and
-        // centred across the panel.
+        // The picture at its own aspect (4:3 for a live capture), as large as fits, never cropped
+        // or stretched, top-aligned and centred across the panel.
+        let live = self
+            .current_source
+            .as_ref()
+            .map(|s| s.is_live())
+            .unwrap_or(false);
+        let aspect = display_aspect(live, self.state.video_aspect);
         let available = ui.available_size();
-        let (w, h) = if available.x * 3.0 / 4.0 <= available.y {
-            (available.x, available.x * 3.0 / 4.0)
+        let (w, h) = if available.x / aspect <= available.y {
+            (available.x, available.x / aspect)
         } else {
-            (available.y * 4.0 / 3.0, available.y)
+            (available.y * aspect, available.y)
         };
         let size = egui::vec2(w.max(1.0), h.max(1.0));
         let (rect, response) = ui
@@ -300,18 +327,15 @@ impl MpvView {
                     return;
                 }
                 let gl = painter.gl();
-                let ppp = info.pixels_per_point;
 
-                // Compute GL viewport (Y flipped: GL origin is bottom-left)
-                let screen_h = info.viewport_in_pixels().height_px;
-                let x = (rect.min.x * ppp).round() as i32;
-                let y_egui = (rect.min.y * ppp).round() as i32;
-                let w = (rect.width() * ppp).round() as i32;
-                let h = (rect.height() * ppp).round() as i32;
-                let y_gl = screen_h - y_egui - h;
+                // egui has already set the GL viewport to this callback's rectangle;
+                // `viewport_in_pixels` describes that rectangle (not the whole window), so use it
+                // as it is. Computing a position from the window height put the picture lower than
+                // the rectangle by the rectangle's own top offset, cutting off the bottom.
+                let vp = info.viewport_in_pixels();
 
                 unsafe {
-                    gl.viewport(x, y_gl, w, h);
+                    gl.viewport(vp.left_px, vp.from_bottom_px, vp.width_px, vp.height_px);
                     gl.disable(glow::DEPTH_TEST);
                     gl.disable(glow::BLEND);
                     gl.use_program(Some(blit.program));
@@ -324,10 +348,8 @@ impl MpvView {
                     gl.use_program(None);
                     gl.bind_texture(glow::TEXTURE_2D, None);
 
-                    // Restore full-window viewport and re-enable blend so egui
-                    // can correctly render any shapes (OSD, text) after this callback.
-                    let vp = info.viewport_in_pixels();
-                    gl.viewport(vp.left_px, vp.from_bottom_px, vp.width_px, vp.height_px);
+                    // Re-enable blend so egui can correctly render any shapes (OSD, text)
+                    // after this callback; the viewport is already the callback's own.
                     gl.enable(glow::BLEND);
                 }
             })),
@@ -610,4 +632,35 @@ unsafe fn egl_get_proc(name: *const libc::c_char) -> *mut c_void {
         unsafe { std::mem::transmute(sym) }
     });
     unsafe { f(name) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::display_aspect;
+
+    #[test]
+    fn a_live_capture_and_a_720x480_frame_are_shown_at_4_3() {
+        assert!((display_aspect(true, 0.0) - 4.0 / 3.0).abs() < 1e-6);
+        assert!(
+            (display_aspect(true, 2.35) - 4.0 / 3.0).abs() < 1e-6,
+            "live is always 4:3"
+        );
+        // mpv calls an NTSC 720x480 frame 3:2 (square pixels); the tape is 4:3.
+        assert!((display_aspect(false, 1.5) - 4.0 / 3.0).abs() < 1e-6);
+        assert!(
+            (display_aspect(false, 0.0) - 4.0 / 3.0).abs() < 1e-6,
+            "unknown is 4:3"
+        );
+    }
+
+    #[test]
+    fn other_files_keep_their_own_display_aspect() {
+        // A 4:3 viewer copy, a 1280x552 letterboxed upscale, a 16:9 file.
+        assert!((display_aspect(false, 4.0 / 3.0) - 4.0 / 3.0).abs() < 1e-6);
+        assert!((display_aspect(false, 1280.0 / 552.0) - 2.3188).abs() < 1e-3);
+        assert!((display_aspect(false, 16.0 / 9.0) - 1.7778).abs() < 1e-3);
+        // Nonsense is clamped rather than producing a sliver.
+        assert_eq!(display_aspect(false, 40.0), 3.5);
+        assert_eq!(display_aspect(false, 0.01), 0.5);
+    }
 }
