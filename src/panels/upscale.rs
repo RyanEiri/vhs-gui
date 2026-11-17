@@ -4,13 +4,21 @@ use crate::config::Config;
 use crate::icons;
 use crate::library::Library;
 use crate::mpv_view::{MpvView, Source};
+use crate::panels::status_bar::{confirm_button, overall_progress};
 use crate::pipeline::PipelineJob;
 use crate::settings::{
     Backend, BrightnessPreset, CrushPreset, UpscaleSettings, preset_models_dirs,
 };
+use crate::status::{Armed, Confirm, Remaining, hms};
 use crate::theme;
 use crate::upscale::plan::Variant;
 use crate::vs_ops::VsOp;
+
+enum CentralAction {
+    Pause,
+    StopAfter,
+    Cancel,
+}
 
 struct UpscalePreviewTextures {
     orig: egui::TextureHandle,
@@ -114,8 +122,26 @@ impl UpscalePanel {
                 ui.label("Backend");
                 ui.horizontal(|ui| {
                     let prev = self.settings.backend.clone();
-                    ui.radio_value(&mut self.settings.backend, Backend::Rocm, "ROCm");
-                    ui.radio_value(&mut self.settings.backend, Backend::Vulkan, "Vulkan");
+                    // Two joined segments: the active one is filled with the accent.
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    for (b, label) in [(Backend::Rocm, "ROCm"), (Backend::Vulkan, "Vulkan")] {
+                        let on = self.settings.backend == b;
+                        let text = egui::RichText::new(label).color(if on {
+                            theme::color::ACCENT_INK
+                        } else {
+                            theme::color::TEXT_NORMAL
+                        });
+                        let btn = egui::Button::new(text)
+                            .fill(if on {
+                                theme::color::ACCENT
+                            } else {
+                                theme::color::WIDGET_IDLE
+                            })
+                            .min_size(egui::vec2(72.0, 24.0));
+                        if ui.add(btn).clicked() {
+                            self.settings.backend = b;
+                        }
+                    }
                     if self.settings.backend != prev {
                         changed = true;
                         // Clamp model index to the new effective list length.
@@ -556,100 +582,252 @@ impl UpscalePanel {
         }
     }
 
-    /// Draw the central-panel content when an upscale job is active.
-    pub fn show_central(&self, ui: &mut egui::Ui) {
-        // Progress bars at top, always visible (even before the first preview frame).
-        if let Some(ref job) = self.pipeline {
-            if job.is_upscale {
-                let total_p = job.total_progress().unwrap_or(0.0);
-                let seg_p = job.segment_progress().unwrap_or(0.0);
-                let total_text = if job.total_segments > 0 {
-                    format!("{}/{} segs", job.completed_segments, job.total_segments)
-                } else {
-                    "…".into()
-                };
-                let seg_text = if job.segment_frames > 0 {
-                    format!("{}/{} frames", job.upscaled_frames, job.segment_frames)
-                } else {
-                    "…".into()
-                };
-                ui.add(
-                    egui::ProgressBar::new(total_p)
-                        .desired_width(f32::INFINITY)
-                        .text(total_text),
-                );
-                ui.add(
-                    egui::ProgressBar::new(seg_p)
-                        .desired_width(f32::INFINITY)
-                        .text(seg_text),
-                );
-                ui.add_space(4.0);
-            } else if let Some(p) = job.progress() {
-                ui.add(
-                    egui::ProgressBar::new(p)
-                        .desired_width(f32::INFINITY)
-                        .show_percentage(),
-                );
-                ui.add_space(4.0);
-            }
-        }
-
-        if let Some(ref textures) = self.preview_textures {
-            // clip_rect() is always finite; available_size().x and max_rect().width() can be inf.
-            let avail_w = ui.clip_rect().width();
-            let avail_h = ui.available_size().y;
-            let label_h = 18.0;
-            let gap = 6.0;
-            let item_sp = ui.spacing().item_spacing.x;
-            // Total horizontal overhead: explicit gap + two item-spacings flanking it.
-            let panel_w = ((avail_w - gap - item_sp * 2.0) / 2.0).floor();
-            let panel_h = (panel_w * 3.0 / 4.0).min(avail_h - label_h - 4.0);
-
-            let seg_label = format!(
-                "Seg {} / {}  ·  Frame {} / {}",
-                textures.segment, textures.total_segments, textures.frame, textures.segment_frames,
-            );
-
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.set_max_width(panel_w);
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Original  720×480").small().weak());
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(egui::RichText::new(&seg_label).small().weak());
-                        });
-                    });
-                    ui.add(
-                        egui::Image::new(egui::load::SizedTexture::from_handle(&textures.orig))
-                            .fit_to_exact_size(egui::vec2(panel_w, panel_h)),
-                    );
-                });
-                ui.add_space(gap);
-                ui.vertical(|ui| {
-                    ui.set_max_width(panel_w);
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "Upscaled  {}×",
-                                self.settings.internal_scale
-                            ))
-                            .small()
-                            .weak(),
-                        );
-                    });
-                    ui.add(
-                        egui::Image::new(egui::load::SizedTexture::from_handle(&textures.upscaled))
-                            .fit_to_exact_size(egui::vec2(panel_w, panel_h)),
-                    );
-                });
-            });
+    /// The Upscale view while a job runs: segment readout, time left, two progress bars and the
+    /// controls on top, the before and after frames below. Above about 1500 px of width everything
+    /// scales up so it reads from across the room.
+    pub fn show_central(&mut self, ui: &mut egui::Ui, remaining: Remaining, confirm: &mut Confirm) {
+        let k: f32 = if ui.available_width() >= 1500.0 {
+            1.8
         } else {
-            ui.centered_and_justified(|ui| {
-                ui.label(
-                    egui::RichText::new("Upscaling…\nPreview frames will appear shortly").weak(),
-                );
+            1.0
+        };
+        egui::Frame::new()
+            .inner_margin(egui::Margin::same(16))
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 6.0 * k;
+                self.upscale_progress_block(ui, k, remaining, confirm);
+                self.upscale_previews(ui);
             });
+    }
+
+    fn upscale_progress_block(
+        &mut self,
+        ui: &mut egui::Ui,
+        k: f32,
+        remaining: Remaining,
+        confirm: &mut Confirm,
+    ) {
+        let Some(job) = self.pipeline.as_mut() else {
+            return;
+        };
+        let mono = |text: String, size: f32, color: egui::Color32| {
+            egui::RichText::new(text)
+                .monospace()
+                .size(size * k)
+                .color(color)
+        };
+        let overall = overall_progress(job).unwrap_or(0.0);
+        let total = job.total_segments;
+        let current = (job.completed_segments + 1).min(total.max(1));
+        let button_h = 28.0 * k;
+        let narrow = ui.available_width() < 700.0;
+        let right_w = if narrow { 0.0 } else { 270.0 * k };
+        let gap = if narrow { 0.0 } else { 16.0 };
+        let left_w = (ui.available_width() - right_w - gap).max(120.0);
+        let mut action = None;
+        let body = |ui: &mut egui::Ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            ui.vertical(|ui| {
+                ui.set_width(left_w);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("Segment {current} of {total}"))
+                            .family(egui::FontFamily::Name(theme::FAMILY_MONO_BOLD.into()))
+                            .size(24.0 * k)
+                            .color(theme::color::TEXT_STRONG),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("{:.0}%", overall * 100.0))
+                            .family(egui::FontFamily::Name(theme::FAMILY_MONO_BOLD.into()))
+                            .size(24.0 * k)
+                            .color(theme::color::ACCENT),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        match remaining {
+                            Remaining::Secs(s) => ui.label(mono(
+                                format!("{} left", hms(s)),
+                                18.0,
+                                theme::color::TEXT_STRONG,
+                            )),
+                            Remaining::Paused => {
+                                ui.label(mono("paused".into(), 18.0, theme::color::WARNING))
+                            }
+                            Remaining::Unknown => ui.label(""),
+                        };
+                    });
+                });
+                let fill = if job.paused {
+                    theme::color::WARNING
+                } else {
+                    theme::color::ACCENT
+                };
+                theme::progress(ui, overall, 12.0 * k, fill);
+                let seg = job.segment_progress().unwrap_or(0.0);
+                theme::progress(ui, seg, 5.0 * k, theme::color::TEXT_WEAK);
+                ui.horizontal(|ui| {
+                    ui.label(mono(
+                        format!(
+                            "Segment {current} · frame {} of {}",
+                            job.upscaled_frames, job.segment_frames
+                        ),
+                        11.5,
+                        theme::color::TEXT_NORMAL,
+                    ));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(mono(
+                            format!("elapsed {}", job.elapsed_str()),
+                            11.5,
+                            theme::color::TEXT_WEAK,
+                        ));
+                    });
+                });
+            });
+            let align = if narrow {
+                egui::Align::Min
+            } else {
+                egui::Align::Max
+            };
+            ui.with_layout(egui::Layout::top_down(align), |ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(8.0 * k, 8.0 * k);
+                ui.horizontal(|ui| {
+                    let pause = if job.paused {
+                        format!("{} Resume", icons::PLAY)
+                    } else {
+                        format!("{} Pause", icons::PAUSE)
+                    };
+                    if ui
+                        .add(egui::Button::new(pause).min_size(egui::vec2(0.0, button_h)))
+                        .clicked()
+                    {
+                        action = Some(CentralAction::Pause);
+                    }
+                    if job.stopping_after_segment() {
+                        ui.label(
+                            egui::RichText::new("Stopping…")
+                                .italics()
+                                .size(12.0 * k)
+                                .color(theme::color::TEXT_WEAK),
+                        );
+                    } else if ui
+                        .add(
+                            egui::Button::new("Stop after Segment")
+                                .min_size(egui::vec2(0.0, button_h)),
+                        )
+                        .clicked()
+                    {
+                        action = Some(CentralAction::StopAfter);
+                    }
+                });
+                let cancel = theme::danger_button(format!("{} Cancel…", icons::CANCEL))
+                    .min_size(egui::vec2(0.0, button_h));
+                if confirm_button(
+                    ui,
+                    confirm,
+                    Armed::JobCancel,
+                    cancel,
+                    "Confirm cancel",
+                    "Keep running",
+                    button_h,
+                ) {
+                    action = Some(CentralAction::Cancel);
+                }
+            });
+        };
+        if narrow {
+            ui.vertical(body);
+        } else {
+            ui.horizontal_top(body);
         }
+        match action {
+            Some(CentralAction::Pause) => job.toggle_pause(),
+            Some(CentralAction::StopAfter) => job.request_stop_after_segment(),
+            Some(CentralAction::Cancel) => job.cancel(),
+            None => {}
+        }
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs(1));
+    }
+
+    /// The two frames side by side at their own aspect, with a caption above each. Spread to the
+    /// bottom of the area, so extra height lands between them and the progress block.
+    fn upscale_previews(&self, ui: &mut egui::Ui) {
+        let aspect = self
+            .preview_textures
+            .as_ref()
+            .map(|t| {
+                let s = t.orig.size_vec2();
+                s.x / s.y.max(1.0)
+            })
+            .unwrap_or(4.0 / 3.0);
+        let gap = 16.0;
+        let cap_h = 20.0;
+        let avail = ui.available_size();
+        let max_w = ((avail.x - gap) / 2.0).max(40.0);
+        let max_h = (avail.y - cap_h - 4.0).max(60.0);
+        let (pw, ph) = if max_w / aspect <= max_h {
+            (max_w, max_w / aspect)
+        } else {
+            (max_h * aspect, max_h)
+        };
+        ui.add_space(8.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(avail.x, ph + cap_h),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    let caption = |t: String| {
+                        egui::RichText::new(t)
+                            .monospace()
+                            .size(11.5)
+                            .color(theme::color::TEXT_NORMAL)
+                    };
+                    let size_text = |h: &egui::TextureHandle| {
+                        let s = h.size();
+                        format!("{}×{}", s[0], s[1])
+                    };
+                    let (orig_t, up_t) = match &self.preview_textures {
+                        Some(t) => (
+                            format!("Original  {}", size_text(&t.orig)),
+                            format!("Upscaled  {}", size_text(&t.upscaled)),
+                        ),
+                        None => ("Original".to_owned(), "Upscaled".to_owned()),
+                    };
+                    for (i, caption_text) in [orig_t, up_t].into_iter().enumerate() {
+                        ui.vertical(|ui| {
+                            ui.label(caption(caption_text));
+                            let (rect, _) =
+                                ui.allocate_exact_size(egui::vec2(pw, ph), egui::Sense::hover());
+                            ui.painter()
+                                .rect_filled(rect, 0.0, theme::color::VIDEO_BLACK);
+                            match &self.preview_textures {
+                                Some(t) => {
+                                    let h = if i == 0 { &t.orig } else { &t.upscaled };
+                                    egui::Image::new(egui::load::SizedTexture::from_handle(h))
+                                        .paint_at(ui, rect);
+                                }
+                                None if i == 1 => {
+                                    ui.painter().text(
+                                        rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        "Upscaling…\nPreview frames will appear shortly",
+                                        egui::FontId::new(12.0, egui::FontFamily::Proportional),
+                                        theme::color::TEXT_WEAK,
+                                    );
+                                }
+                                None => {}
+                            }
+                            ui.painter().rect_stroke(
+                                rect,
+                                0.0,
+                                egui::Stroke::new(1.0_f32, theme::color::STROKE_SUBTLE),
+                                egui::StrokeKind::Inside,
+                            );
+                        });
+                    }
+                });
+            },
+        );
     }
 
     // -----------------------------------------------------------------------

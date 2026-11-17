@@ -99,6 +99,11 @@ impl StatusBar {
         }
     }
 
+    /// The time-left estimate for the running job, for the Upscale view's readout.
+    pub fn remaining(&self, paused: bool) -> Remaining {
+        self.time_left.remaining(paused)
+    }
+
     // egui 0.34: no non-deprecated top-level Panel::show; revisit on egui upgrade.
     #[allow(deprecated)]
     pub fn show(

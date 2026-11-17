@@ -753,15 +753,6 @@ impl PipelineJob {
         Some((self.upscaled_frames as f32 / self.segment_frames as f32).min(1.0))
     }
 
-    /// Overall upscale progress: completed segments / total segments.
-    /// Returns `None` for non-upscale jobs or when total is unknown.
-    pub fn total_progress(&self) -> Option<f32> {
-        if !self.is_upscale || self.total_segments == 0 {
-            return None;
-        }
-        Some((self.completed_segments as f32 / self.total_segments as f32).min(1.0))
-    }
-
     /// Send SIGINT to the job's process group.
     /// Safe because every constructor sets `pgid` to the actual group leader
     /// (child pid for bash/single jobs, producer pid for native pipe jobs).

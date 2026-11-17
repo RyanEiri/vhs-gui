@@ -103,6 +103,7 @@ DISPLAY=:0 ./target/debug/vhs-gui
   as before. The action region sits in a bottom panel under the list and shows either the groups or one
   inline panel (`Inline`: Trash, Rename, Audio Cleanup, Letterbox) that replaces them; Move to Trash… is
   in the Library toolbar.
+- **Upscale view** (`UpscalePanel::show_central`): while a job runs, a large block (Segment x of y, %, time left from the status bar's `TimeLeft`, overall and segment bars, Pause / Stop after Segment / Cancel… via `confirm_button`) over the before/after frames at their own aspect. Controls stack under the block below 700 px of width; everything scales 1.8x above 1500 px. Backend is a two-segment toggle in the Settings panel.
 - **`src/v4l2.rs`** — the native-Rust precedent to imitate for future ports: raw
   `libc::ioctl` (`VIDIOC_G_CTRL`/`VIDIOC_S_CTRL`), no subprocess, fd owned by a
   dedicated background thread reached via a bounded channel so the UI thread never
