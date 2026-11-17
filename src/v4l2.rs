@@ -1,4 +1,5 @@
 use crate::icons;
+use crate::theme;
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::sync::mpsc::{self, SyncSender};
@@ -163,65 +164,73 @@ impl V4l2Controls {
         let _ = self.cmd_tx.try_send(msg);
     }
 
-    /// Draw the 5-row slider panel.
-    /// `show_close` — when true, renders a ◀ button that signals the caller to close the panel.
-    /// Returns `(changed, close_clicked)`.
-    pub fn show_panel(&mut self, ui: &mut egui::Ui, show_close: bool) -> (bool, bool) {
-        let mut close_clicked = false;
-        ui.horizontal(|ui| {
-            ui.heading("Input");
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if show_close
-                    && ui
-                        .small_button(icons::BACK)
-                        .on_hover_text("Close panel")
-                        .clicked()
-                {
-                    close_clicked = true;
-                }
-                if ui.small_button("Reset All").clicked() {
-                    self.reset_all();
-                }
-            });
-        });
-        ui.separator();
-
+    /// Draw the input controls: a collapsible INPUT section with Reset All, and for each control its
+    /// label, current value and reset button above a full-width slider. `collapsed_by_default`
+    /// starts the section closed (while a capture runs, to leave the Session block room); it still
+    /// works when opened. Returns true when a value was changed.
+    pub fn show_panel(&mut self, ui: &mut egui::Ui, collapsed_by_default: bool) -> bool {
         let mut fires: Vec<(u32, i32)> = Vec::new();
         let mut reset_idx: Option<usize> = None;
+        let mut reset_all = false;
 
-        egui::Grid::new("v4l2_sliders")
-            .num_columns(3)
-            .spacing([6.0, 4.0])
+        egui::CollapsingHeader::new(theme::section_label("Input"))
+            .id_salt(("v4l2_input", collapsed_by_default))
+            .default_open(!collapsed_by_default)
             .show(ui, |ui| {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let b = egui::Button::new(egui::RichText::new("Reset All").size(11.0))
+                        .fill(theme::color::TRANSPARENT)
+                        .stroke(egui::Stroke::NONE);
+                    if ui.add(b).clicked() {
+                        reset_all = true;
+                    }
+                });
+                ui.spacing_mut().slider_rail_height = 4.0;
                 for (i, (ctrl, (_, _, _, _, _, cid))) in
                     self.ctrls.iter_mut().zip(DEFAULTS).enumerate()
                 {
-                    ui.label(ctrl.label);
+                    ui.horizontal(|ui| {
+                        ui.label(ctrl.label);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let reset = egui::Button::new(icons::RESET)
+                                .fill(theme::color::TRANSPARENT)
+                                .min_size(egui::vec2(20.0, 20.0));
+                            if ui
+                                .add(reset)
+                                .on_hover_text(format!("Reset to {}", ctrl.default))
+                                .clicked()
+                            {
+                                reset_idx = Some(i);
+                            }
+                            ui.label(
+                                egui::RichText::new(ctrl.value.to_string())
+                                    .monospace()
+                                    .size(11.5)
+                                    .color(theme::color::TEXT_STRONG),
+                            );
+                        });
+                    });
+                    ui.spacing_mut().slider_width = ui.available_width();
                     let resp = ui.add(
                         egui::Slider::new(&mut ctrl.value, ctrl.min..=ctrl.max)
+                            .show_value(false)
                             .clamping(egui::SliderClamping::Always),
                     );
                     if resp.changed() {
                         fires.push((*cid, ctrl.value));
                     }
-                    if ui
-                        .small_button(icons::RESET)
-                        .on_hover_text(format!("Reset to {}", ctrl.default))
-                        .clicked()
-                    {
-                        reset_idx = Some(i);
-                    }
-                    ui.end_row();
                 }
             });
 
-        let changed = !fires.is_empty() || reset_idx.is_some();
+        let changed = !fires.is_empty() || reset_idx.is_some() || reset_all;
         for (cid, value) in fires {
             self.send(CtrlMsg::Set { cid, value });
         }
-        if let Some(i) = reset_idx {
+        if reset_all {
+            self.reset_all();
+        } else if let Some(i) = reset_idx {
             self.reset_one(i);
         }
-        (changed, close_clicked)
+        changed
     }
 }

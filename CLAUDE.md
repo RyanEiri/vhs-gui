@@ -65,7 +65,7 @@ DISPLAY=:0 ./target/debug/vhs-gui
   a stale pgid file whose pid can be reused); a failing lock is deleted. Reattach
   takes the segment length from the running job's `WORK_DIR/run_config.txt`
   (`SEG_SECONDS`), not the UI slider.
-- **`src/panels/monitor.rs`** + **`src/capture.rs`** — capture state machine (`Idle →
+- **`src/panels/monitor.rs`** + **`src/capture.rs`** — capture state machine (its UI is the Session block at the top of the Capture side panel, `MonitorPanel::show_session`: Idle/Monitoring, Releasing, Recording and the orphan block, above the collapsible V4L2 Input section; while recording the Capture toolbar turns red) (`Idle →
   Monitoring → Releasing → Capturing`). mpv never opens `/dev/video`: `monitor_feed::MonitorFeed` is
   a small ffmpeg that reads the grabber and sends the preview mpv plays over UDP; Releasing waits
   until it has exited (mpv's `idle` is not a signal that the device is free). Closing mpv's own V4L2

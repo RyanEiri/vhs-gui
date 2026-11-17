@@ -6,7 +6,7 @@ use crate::icons;
 use crate::monitor_feed::MonitorFeed;
 use crate::mpv_view::{MpvView, Source};
 use crate::panels::status_bar::confirm_button;
-use crate::status::{Armed, Confirm};
+use crate::status::{Armed, Confirm, capture_progress, hms};
 use crate::theme;
 use crate::v4l2::V4l2Controls;
 
@@ -71,8 +71,11 @@ impl MonitorPanel {
 
     /// Draw the V4L2 hardware-control sliders inside a caller-supplied panel.
     /// Returns true if any control value changed this frame (triggers a settings save).
+    /// The V4L2 sliders below the Session block; collapsed to start with while a capture is
+    /// running, to leave the Session block room.
     pub fn show_input_panel(&mut self, ui: &mut egui::Ui) -> bool {
-        self.v4l2.show_panel(ui, false).0
+        let recording = self.state == CaptureState::Capturing || !self.orphans.is_empty();
+        self.v4l2.show_panel(ui, recording)
     }
 
     /// The elapsed time of a recording, for the status bar's REC chip: this app's own capture, or
@@ -85,14 +88,24 @@ impl MonitorPanel {
         }
     }
 
+    /// The stop time of the running capture in seconds from its start: elapsed plus what is left.
+    pub fn stop_total_secs(&self) -> Option<u64> {
+        let elapsed = self.capture.elapsed_secs()?;
+        let left = self
+            .capture_stop_at?
+            .saturating_duration_since(Instant::now())
+            .as_secs();
+        Some(elapsed + left)
+    }
+
     /// A capture from an earlier run is still recording.
     pub fn has_orphan(&self) -> bool {
         self.state == CaptureState::Idle && !self.orphans.is_empty()
     }
 
-    /// Renders the capture-state portion of the toolbar.
-    /// Returns true when the library should be refreshed (capture stopped via button).
-    pub fn toolbar_section(
+    /// The Session block at the top of the Capture side panel: what the device is doing and the
+    /// controls for it. Returns true when the library should be refreshed (a capture was stopped).
+    pub fn show_session(
         &mut self,
         ui: &mut egui::Ui,
         mpv: &mut MpvView,
@@ -100,88 +113,264 @@ impl MonitorPanel {
         status: &mut String,
         confirm: &mut Confirm,
     ) -> bool {
-        let mut needs_refresh = false;
         match self.state {
             CaptureState::Idle if !self.orphans.is_empty() => {
-                needs_refresh |= self.orphan_banner(ui, cfg, status, confirm);
+                self.orphan_block(ui, cfg, status, confirm)
             }
-            CaptureState::Idle => {
-                if ui.button("Monitor").clicked() {
-                    match self.start_monitor(mpv, cfg) {
-                        Ok(()) => *status = "Monitoring live signal".into(),
-                        Err(e) => *status = format!("Monitor failed to start: {e}"),
-                    }
-                }
-                if ui.button("Start Capture").clicked() {
-                    self.begin_capture(cfg, status);
-                }
-            }
-            CaptureState::Monitoring => {
-                ui.label(egui::RichText::new("● MONITOR").color(theme::color::SUCCESS));
-                if ui.button("Start Capture").clicked() {
-                    self.begin_capture(cfg, status);
-                }
-                if ui.button("Stop Monitor").clicked() {
-                    self.feed.stop();
-                    mpv.stop();
-                    self.state = CaptureState::Idle;
-                    *status = "Idle".into();
-                }
+            CaptureState::Idle | CaptureState::Monitoring => {
+                self.start_block(ui, mpv, cfg, status);
+                false
             }
             CaptureState::Releasing => {
-                ui.label(egui::RichText::new("Releasing device…").italics());
+                session_header(ui, None);
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new().size(14.0).color(theme::color::ACCENT));
+                    ui.label(egui::RichText::new("Releasing device…").italics());
+                });
+                false
             }
-            CaptureState::Capturing => {
-                ui.label(egui::RichText::new("● CAPTURE").color(theme::color::DANGER));
-                let stats = self.capture.stats.lock().unwrap().clone();
-                ui.label(format!(
-                    "  {}  frame {}  {}  {}",
-                    self.capture.elapsed_str(),
-                    stats.frame,
-                    stats.time,
-                    stats.bitrate,
-                ));
-                if confirm_button(
-                    ui,
-                    confirm,
-                    Armed::StopCapture,
-                    "Stop Capture",
-                    "Confirm stop",
-                    "Keep recording",
-                ) {
-                    needs_refresh = self.do_stop_capture(status);
-                }
-                ui.separator();
-                ui.label("Stop after:");
-                let input = ui.add(
-                    egui::TextEdit::singleline(&mut self.capture_stop_input)
-                        .desired_width(70.0)
-                        .hint_text("HH:MM:SS"),
+            CaptureState::Capturing => self.recording_block(ui, status, confirm),
+        }
+    }
+
+    /// Idle and Monitoring: the state badge, Max length, and the buttons that start things.
+    fn start_block(
+        &mut self,
+        ui: &mut egui::Ui,
+        mpv: &mut MpvView,
+        cfg: &Config,
+        status: &mut String,
+    ) {
+        let monitoring = self.state == CaptureState::Monitoring;
+        session_header(ui, None);
+        ui.horizontal(|ui| {
+            if monitoring {
+                theme::badge(ui, "LIVE", theme::Tone::Success, true);
+                ui.label(
+                    egui::RichText::new("Monitoring, not recording")
+                        .size(11.5)
+                        .color(theme::color::TEXT_WEAK),
                 );
-                let set_clicked = ui.button("Set").clicked();
-                if (set_clicked
-                    || (input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))))
-                    && let Some(secs) = parse_duration_secs(&self.capture_stop_input)
-                {
-                    self.capture.arm_stop_timer(secs);
-                    self.capture_stop_at = Some(Instant::now() + Duration::from_secs(secs));
-                    *status = format!("Stopping in {}", fmt_secs(secs));
-                }
-                if let Some(deadline) = self.capture_stop_at {
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{} {}",
-                            icons::TIME,
-                            fmt_secs(remaining.as_secs())
-                        ))
-                        .color(theme::color::WARNING)
-                        .small(),
-                    );
+            } else {
+                theme::badge(ui, "IDLE", theme::Tone::Neutral, false);
+                ui.label(
+                    egui::RichText::new("Device free")
+                        .size(11.5)
+                        .color(theme::color::TEXT_WEAK),
+                );
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Max length");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.max_duration)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width(92.0)
+                    .hint_text("HH:MM:SS"),
+            )
+            .on_hover_text("Applies to the next capture only; Stop after changes the running one");
+        });
+        if !monitoring {
+            let b = egui::Button::new(format!("{} Monitor", icons::VIEWER));
+            if full_width(ui, b, theme::size::PRIMARY_HEIGHT - 2.0).clicked() {
+                match self.start_monitor(mpv, cfg) {
+                    Ok(()) => *status = "Monitoring live signal".into(),
+                    Err(e) => *status = format!("Monitor failed to start: {e}"),
                 }
             }
         }
+        let start = theme::danger_solid_button(format!("{} Start Capture", icons::CAPTURE));
+        if full_width(ui, start, theme::size::PRIMARY_HEIGHT).clicked() {
+            self.begin_capture(cfg, status);
+        }
+        if monitoring {
+            let stop = egui::Button::new(format!("{} Stop Monitor", icons::STOP));
+            if full_width(ui, stop, theme::size::PRIMARY_HEIGHT - 2.0).clicked() {
+                self.feed.stop();
+                mpv.stop();
+                self.state = CaptureState::Idle;
+                *status = "Idle".into();
+            }
+        }
+    }
+
+    /// Recording: the clock, how far it is to the stop time, the file, Stop after and Stop Capture.
+    fn recording_block(
+        &mut self,
+        ui: &mut egui::Ui,
+        status: &mut String,
+        confirm: &mut Confirm,
+    ) -> bool {
+        let mut needs_refresh = false;
+        let elapsed = self.capture.elapsed_secs().unwrap_or(0);
+        let remaining = self
+            .capture_stop_at
+            .map(|d| d.saturating_duration_since(Instant::now()).as_secs());
+
+        session_header(ui, Some(("REC", theme::Tone::DangerSolid, true)));
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(hms(elapsed))
+                    .text_style(egui::TextStyle::Name(theme::STYLE_CLOCK.into()))
+                    .color(theme::color::TEXT_STRONG),
+            );
+            ui.label(
+                egui::RichText::new("elapsed")
+                    .size(11.5)
+                    .color(theme::color::TEXT_WEAK),
+            );
+        });
+        if let Some((total, fraction)) = capture_progress(elapsed, remaining) {
+            theme::progress(ui, fraction, 8.0, theme::color::DANGER);
+            ui.horizontal(|ui| {
+                let mono = |t: String, c| egui::RichText::new(t).monospace().size(11.5).color(c);
+                ui.label(mono(
+                    format!("stops {}", hms(total)),
+                    theme::color::TEXT_WEAK,
+                ));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let left = total.saturating_sub(elapsed);
+                    ui.label(mono(
+                        format!("{} left", hms(left)),
+                        theme::color::TEXT_STRONG,
+                    ));
+                });
+            });
+        }
+        if let Some(name) = self.capture.file_name() {
+            ui.label(
+                egui::RichText::new("Recording to")
+                    .size(11.5)
+                    .color(theme::color::TEXT_WEAK),
+            );
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(name)
+                        .monospace()
+                        .size(10.5)
+                        .color(theme::color::TEXT_NORMAL),
+                )
+                .wrap_mode(egui::TextWrapMode::Wrap),
+            );
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("Stop after");
+            let input = ui.add(
+                egui::TextEdit::singleline(&mut self.capture_stop_input)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_width(92.0)
+                    .hint_text("HH:MM:SS"),
+            );
+            let set_clicked = ui.button("Set").clicked();
+            if (set_clicked
+                || (input.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))))
+                && let Some(secs) = parse_duration_secs(&self.capture_stop_input)
+            {
+                self.capture.arm_stop_timer(secs);
+                self.capture_stop_at = Some(Instant::now() + Duration::from_secs(secs));
+                *status = format!("Stopping in {}", fmt_secs(secs));
+            }
+        });
+
+        let stop = egui::Button::new(format!("{} Stop Capture", icons::STOP)).min_size(egui::vec2(
+            ui.available_width(),
+            theme::size::PRIMARY_HEIGHT,
+        ));
+        if confirm_button(
+            ui,
+            confirm,
+            Armed::StopCapture,
+            stop,
+            "Confirm stop",
+            "Keep recording",
+            theme::size::PRIMARY_HEIGHT,
+        ) {
+            needs_refresh = self.do_stop_capture(status);
+        }
         needs_refresh
+    }
+
+    /// A capture that outlived an earlier run: say so, and offer Reattach or Stop it. Returns true
+    /// when the library should refresh.
+    fn orphan_block(
+        &mut self,
+        ui: &mut egui::Ui,
+        cfg: &Config,
+        status: &mut String,
+        confirm: &mut Confirm,
+    ) -> bool {
+        let Some(orphan) = self.orphans.first().cloned() else {
+            return false;
+        };
+        session_header(ui, Some(("STILL RECORDING", theme::Tone::Warning, false)));
+        ui.label(
+            egui::RichText::new(
+                "A capture started by an earlier run of vhs-gui is still recording.",
+            )
+            .size(11.5)
+            .color(theme::color::TEXT_NORMAL),
+        );
+        ui.label(
+            egui::RichText::new(format!("Running for {}", fmt_secs(orphan.age_secs)))
+                .size(11.5)
+                .color(theme::color::TEXT_WEAK),
+        );
+        ui.label(
+            egui::RichText::new("File")
+                .size(11.5)
+                .color(theme::color::TEXT_WEAK),
+        );
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(orphan.name())
+                    .monospace()
+                    .size(10.5)
+                    .color(theme::color::TEXT_NORMAL),
+            )
+            .wrap_mode(egui::TextWrapMode::Wrap),
+        );
+
+        if orphan.is_group_leader() {
+            let reattach = theme::primary_button(format!("{} Reattach", icons::REATTACH));
+            if full_width(ui, reattach, theme::size::PRIMARY_HEIGHT).clicked() {
+                match self.capture.adopt(&orphan, &cfg.log_dir()) {
+                    Ok(()) => {
+                        self.orphans.clear();
+                        self.state = CaptureState::Capturing;
+                        self.preview_opened = false;
+                        self.capture_last_reopen_at = Some(Instant::now());
+                        self.capture_stop_input.clear();
+                        self.capture_stop_at = None;
+                        *status = "Reattached to the running capture".into();
+                    }
+                    Err(e) => *status = format!("Cannot reattach: {e}"),
+                }
+            }
+            caption(ui, "Show its progress, stop it from here, set a stop time.");
+        }
+        let stop_it = theme::danger_button(format!("{} Stop it", icons::CANCEL)).min_size(
+            egui::vec2(ui.available_width(), theme::size::PRIMARY_HEIGHT),
+        );
+        let stopped = confirm_button(
+            ui,
+            confirm,
+            Armed::StopOrphan,
+            stop_it,
+            "Confirm stop",
+            "Keep recording",
+            theme::size::PRIMARY_HEIGHT,
+        );
+        caption(ui, "Interrupt ffmpeg so the file is finalized.");
+        if stopped {
+            for o in &self.orphans {
+                o.stop();
+            }
+            self.orphan_scan_due = Instant::now() + Duration::from_secs(1);
+            *status = "Stopping the running capture…".into();
+            return true;
+        }
+        false
     }
 
     /// Called every frame from `App::update`. Handles:
@@ -342,64 +531,6 @@ impl MonitorPanel {
         }
     }
 
-    /// The "a capture is already running" banner. Returns true when the library should refresh.
-    fn orphan_banner(
-        &mut self,
-        ui: &mut egui::Ui,
-        cfg: &Config,
-        status: &mut String,
-        confirm: &mut Confirm,
-    ) -> bool {
-        let Some(orphan) = self.orphans.first().cloned() else {
-            return false;
-        };
-        ui.label(
-            egui::RichText::new(format!(
-                "{} A capture is already running: {} (for {})",
-                icons::WARNING,
-                orphan.name(),
-                fmt_secs(orphan.age_secs)
-            ))
-            .color(theme::color::WARNING),
-        );
-        if orphan.is_group_leader()
-            && ui
-                .button("Reattach")
-                .on_hover_text("Show its progress, stop it from here, set a stop time")
-                .clicked()
-        {
-            match self.capture.adopt(&orphan, &cfg.log_dir()) {
-                Ok(()) => {
-                    self.orphans.clear();
-                    self.state = CaptureState::Capturing;
-                    self.preview_opened = false;
-                    self.capture_last_reopen_at = Some(Instant::now());
-                    self.capture_stop_input.clear();
-                    self.capture_stop_at = None;
-                    *status = "Reattached to the running capture".into();
-                }
-                Err(e) => *status = format!("Cannot reattach: {e}"),
-            }
-        }
-        let stop_it = confirm_button(
-            ui,
-            confirm,
-            Armed::StopOrphan,
-            "Stop it",
-            "Confirm stop",
-            "Keep recording",
-        );
-        if stop_it {
-            for o in &self.orphans {
-                o.stop();
-            }
-            self.orphan_scan_due = Instant::now() + Duration::from_secs(1);
-            *status = "Stopping the running capture…".into();
-            return true;
-        }
-        false
-    }
-
     /// Returns true → caller should refresh the library.
     fn do_stop_capture(&mut self, status: &mut String) -> bool {
         self.capture.stop();
@@ -463,6 +594,32 @@ fn parse_duration_secs(s: &str) -> Option<u64> {
         [sec] => sec.parse().ok(),
         _ => None,
     }
+}
+
+/// The "SESSION" label with an optional badge on the right.
+fn session_header(ui: &mut egui::Ui, badge: Option<(&str, theme::Tone, bool)>) {
+    ui.horizontal(|ui| {
+        ui.label(theme::section_label("Session"));
+        if let Some((text, tone, dot)) = badge {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                theme::badge(ui, text, tone, dot);
+            });
+        }
+    });
+}
+
+/// A button as wide as the panel.
+fn full_width(ui: &mut egui::Ui, button: egui::Button<'_>, height: f32) -> egui::Response {
+    ui.add(button.min_size(egui::vec2(ui.available_width(), height)))
+}
+
+/// A line of help text under a button.
+fn caption(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        egui::RichText::new(text)
+            .size(10.5)
+            .color(theme::color::TEXT_WEAK),
+    );
 }
 
 fn fmt_secs(secs: u64) -> String {

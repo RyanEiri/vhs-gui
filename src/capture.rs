@@ -652,6 +652,20 @@ impl CaptureController {
         }
     }
 
+    /// Whole seconds since the capture started (or, for an adopted one, since it did).
+    pub fn elapsed_secs(&self) -> Option<u64> {
+        self.started_at.map(|s| s.elapsed().as_secs())
+    }
+
+    /// The archival file's name, from the moment the capture is requested.
+    pub fn file_name(&self) -> Option<String> {
+        self.output_path
+            .as_ref()
+            .or(self.expected_output.as_ref())
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+    }
+
     pub fn elapsed_str(&self) -> String {
         if let Some(started) = self.started_at {
             let d = started.elapsed();
