@@ -38,6 +38,8 @@ pub struct UpscalePanel {
     quiet_spot_scan: Option<(PathBuf, crate::audio_cleanup::QuietSpotScan)>,
     /// Letterbox detection results, applied by the Upscale and Viewer Encode buttons.
     letterbox: super::letterbox::Letterbox,
+    /// An upscale was started or reattached to since the app last looked.
+    upscale_started: bool,
     /// A "Set up VapourSynth" job just ended (successfully or not); the app rechecks the tools.
     vs_setup_finished: bool,
     last_preview_at: Option<std::time::Instant>,
@@ -61,6 +63,7 @@ impl UpscalePanel {
             quiet_spot_scan: None,
             letterbox: Default::default(),
             vs_setup_finished: false,
+            upscale_started: false,
             last_preview_at: None,
             last_preview_frames: 0,
             preview_textures: None,
@@ -387,78 +390,14 @@ impl UpscalePanel {
         self.pipeline.as_ref()
     }
 
-    /// Draw the toolbar section for the Upscale view.
-    /// Shows job label, elapsed time, progress, and pause/stop/cancel controls.
-    /// Does nothing when no job is running.
-    pub fn toolbar_section(&mut self, ui: &mut egui::Ui, status: &mut String) {
-        let job = match self.pipeline.as_mut() {
-            Some(j) => j,
-            None => return,
-        };
+    /// The running job, for the status bar's Pause, Stop after seg and Cancel.
+    pub fn pipeline_job_mut(&mut self) -> Option<&mut crate::pipeline::PipelineJob> {
+        self.pipeline.as_mut()
+    }
 
-        ui.label(egui::RichText::new(&job.label).small());
-        ui.label(
-            egui::RichText::new(job.elapsed_str())
-                .monospace()
-                .small()
-                .weak(),
-        );
-
-        // Progress indicator.
-        if job.is_upscale {
-            if job.total_segments > 0 {
-                let seg_label =
-                    format!("seg {}/{}", job.completed_segments + 1, job.total_segments);
-                ui.label(egui::RichText::new(seg_label).small());
-            }
-            if let Some(p) = job.segment_progress() {
-                ui.add(
-                    egui::ProgressBar::new(p)
-                        .desired_width(80.0)
-                        .show_percentage(),
-                );
-            }
-        } else if let Some(p) = job.progress() {
-            ui.add(
-                egui::ProgressBar::new(p)
-                    .desired_width(120.0)
-                    .show_percentage(),
-            );
-        }
-
-        ui.separator();
-
-        // Pause / Resume.
-        let (pause_label, pause_tip) = if job.paused {
-            (icons::PLAY, "Resume")
-        } else {
-            (icons::PAUSE, "Pause")
-        };
-        if ui.button(pause_label).on_hover_text(pause_tip).clicked() {
-            job.toggle_pause();
-        }
-
-        // Stop after segment (upscale only, when not already requested).
-        if job.is_upscale {
-            if job.stopping_after_segment() {
-                ui.label(egui::RichText::new("stopping…").italics().small().weak());
-            } else {
-                if ui.button("Stop after seg").clicked() {
-                    job.request_stop_after_segment();
-                    *status = "Stopping after current segment…".into();
-                }
-            }
-        }
-
-        // Cancel — sends SIGINT immediately; poll() detects exit next frame.
-        if ui
-            .button("Cancel")
-            .on_hover_text("Terminate immediately")
-            .clicked()
-        {
-            job.cancel();
-            *status = "Cancelling…".into();
-        }
+    /// True once after an upscale started (or was reattached to): the app then shows the Upscale view.
+    pub fn take_upscale_started(&mut self) -> bool {
+        std::mem::take(&mut self.upscale_started)
     }
 
     /// Poll the running job: update progress, upload preview textures, handle completion.
@@ -879,6 +818,7 @@ impl UpscalePanel {
             self.last_preview_frames = 0;
             self.preview_textures = None;
             self.pipeline = Some(job);
+            self.upscale_started = true;
             return;
         }
 
@@ -910,6 +850,7 @@ impl UpscalePanel {
                 self.last_preview_frames = 0;
                 self.preview_textures = None;
                 self.pipeline = Some(job);
+                self.upscale_started = true;
             }
             Err(e) => *status = format!("Failed to start job: {e}"),
         }

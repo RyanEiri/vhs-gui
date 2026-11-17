@@ -58,6 +58,11 @@ pub mod color {
 
     pub const SUCCESS: Color32 = Color32::from_rgb(0x62, 0xD6, 0xA4);
     pub const SUCCESS_DIM: Color32 = Color32::from_rgb(0x12, 0x33, 0x2A);
+
+    /// No fill (outline-only buttons, unselected rail items).
+    pub const TRANSPARENT: Color32 = Color32::TRANSPARENT;
+    /// Text and icons on `DANGER_FILL` (the recording toolbar, REC chip, armed confirm).
+    pub const ON_DANGER: Color32 = Color32::WHITE;
 }
 
 pub mod size {

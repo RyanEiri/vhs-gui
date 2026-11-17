@@ -16,6 +16,7 @@ mod panels;
 mod persist;
 mod pipeline;
 mod settings;
+mod status;
 // Landed in phases; each phase uses more of it. The last phase removes this allow.
 #[allow(dead_code)]
 mod theme;

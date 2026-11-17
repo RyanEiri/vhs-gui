@@ -11,6 +11,19 @@ pub enum FileKind {
     Viewer,
 }
 
+impl FileKind {
+    /// The section and badge name.
+    pub fn label(&self) -> &'static str {
+        match self {
+            FileKind::Viewer => "Viewer",
+            FileKind::EditMasterVD => "Edit Master (VD)",
+            FileKind::EditMaster => "Edit Master",
+            FileKind::Stabilized => "Stabilized",
+            FileKind::Archival => "Archival",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct LibraryEntry {
     pub path: PathBuf,
@@ -139,13 +152,7 @@ impl Library {
             for (i, entry) in self.entries.iter().enumerate() {
                 if last_kind.as_ref() != Some(&entry.kind) {
                     last_kind = Some(entry.kind.clone());
-                    let label = match entry.kind {
-                        FileKind::Viewer => "Viewer",
-                        FileKind::EditMasterVD => "Edit Master (VD)",
-                        FileKind::EditMaster => "Edit Master",
-                        FileKind::Stabilized => "Stabilized",
-                        FileKind::Archival => "Archival",
-                    };
+                    let label = entry.kind.label();
                     ui.separator();
                     ui.label(egui::RichText::new(label).small().weak());
                 }
