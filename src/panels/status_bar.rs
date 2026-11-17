@@ -14,16 +14,18 @@ use crate::theme::{self, color};
 
 const BUTTON_H: f32 = 24.0;
 
-/// Two-click button. The first click swaps it, in the same place, for the safe choice
-/// (`keep_label`, which takes focus) and the confirm (`confirm_label`, solid red); the second click
-/// on the confirm returns `true`. Escape, the safe button or four seconds put it back.
+/// Two-click button. `first` is its normal look (the caller picks the style: a red outline for
+/// Cancel…, a plain button for Stop Capture). The first click swaps it, in the same place, for the
+/// safe choice (`keep_label`, which takes focus) and the confirm (`confirm_label`, solid red); the
+/// second click on the confirm returns `true`. Escape, the safe button or four seconds put it back.
 pub fn confirm_button(
     ui: &mut egui::Ui,
     confirm: &mut Confirm,
     what: Armed,
-    label: &str,
+    first: egui::Button<'_>,
     confirm_label: &str,
     keep_label: &str,
+    height: f32,
 ) -> bool {
     let now = Instant::now();
     if confirm.is_armed(what, now) {
@@ -31,12 +33,12 @@ pub fn confirm_button(
             ui.ctx()
                 .request_repaint_after(left + Duration::from_millis(50));
         }
-        let keep = ui.add(egui::Button::new(keep_label).min_size(egui::vec2(0.0, BUTTON_H)));
+        let keep = ui.add(egui::Button::new(keep_label).min_size(egui::vec2(0.0, height)));
         if !keep.has_focus() {
             keep.request_focus();
         }
         let ok =
-            ui.add(theme::danger_solid_button(confirm_label).min_size(egui::vec2(0.0, BUTTON_H)));
+            ui.add(theme::danger_solid_button(confirm_label).min_size(egui::vec2(0.0, height)));
         if keep.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             confirm.disarm();
         }
@@ -46,9 +48,7 @@ pub fn confirm_button(
         }
         false
     } else {
-        let b = theme::danger_button(format!("{} {label}", icons::CANCEL))
-            .min_size(egui::vec2(0.0, BUTTON_H));
-        if ui.add(b).clicked() {
+        if ui.add(first).clicked() {
             confirm.arm(what, now);
         }
         false
@@ -261,13 +261,16 @@ impl StatusBar {
             }
         }
         ui.separator();
+        let cancel = theme::danger_button(format!("{} Cancel…", icons::CANCEL))
+            .min_size(egui::vec2(0.0, BUTTON_H));
         if confirm_button(
             ui,
             &mut self.confirm,
             Armed::JobCancel,
-            "Cancel…",
+            cancel,
             "Confirm cancel",
             "Keep running",
+            BUTTON_H,
         ) {
             job.cancel();
             *status = "Cancelling…".into();

@@ -131,6 +131,16 @@ impl TimeLeft {
     }
 }
 
+/// Where a capture stands against its stop time: `(stop time in seconds, fraction done)`. The stop
+/// time is the elapsed time plus what is left; `None` when no stop time is set.
+pub fn capture_progress(elapsed: u64, remaining: Option<u64>) -> Option<(u64, f32)> {
+    let total = elapsed + remaining?;
+    if total == 0 {
+        return None;
+    }
+    Some((total, (elapsed as f32 / total as f32).min(1.0)))
+}
+
 /// `HH:MM:SS`, as in the capture clock.
 pub fn hms(secs: u64) -> String {
     format!(
@@ -256,6 +266,17 @@ mod tests {
         steady(&mut tl, at(t0, 40), 20);
         tl.reset();
         assert_eq!(tl.remaining(false), Remaining::Unknown);
+    }
+
+    #[test]
+    fn capture_progress_is_elapsed_over_elapsed_plus_remaining() {
+        // 1:12:44 elapsed with 1:17:16 left stops at 2:30:00, 48.5 % through.
+        let (total, frac) = capture_progress(4364, Some(4636)).unwrap();
+        assert_eq!(hms(total), "02:30:00");
+        assert!((frac - 0.4849).abs() < 0.001);
+        assert_eq!(capture_progress(10, None), None, "no stop time set");
+        assert_eq!(capture_progress(0, Some(0)), None);
+        assert_eq!(capture_progress(100, Some(0)).unwrap().1, 1.0);
     }
 
     #[test]

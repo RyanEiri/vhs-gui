@@ -94,12 +94,20 @@ impl App {
     // egui 0.34: no non-deprecated top-level Panel::show; revisit on egui upgrade.
     #[allow(deprecated)]
     fn show_toolbar(&mut self, ctx: &egui::Context) {
+        // While recording, the Capture toolbar turns red so it cannot be missed.
+        let recording =
+            self.view_mode == ViewMode::Monitor && self.monitor.state == CaptureState::Capturing;
+        let fill = if recording {
+            theme::color::DANGER_FILL
+        } else {
+            theme::color::BG_RAISED
+        };
         egui::Panel::top("toolbar")
             .exact_size(theme::size::TOOLBAR_HEIGHT)
             .resizable(false)
             .frame(
                 egui::Frame::new()
-                    .fill(theme::color::BG_RAISED)
+                    .fill(fill)
                     .stroke(egui::Stroke::new(1.0_f32, theme::color::STROKE_SUBTLE))
                     .inner_margin(egui::Margin {
                         left: 12,
@@ -121,42 +129,65 @@ impl App {
     }
 
     fn capture_toolbar(&mut self, ui: &mut egui::Ui) {
+        if self.monitor.state == CaptureState::Capturing {
+            self.recording_toolbar(ui);
+            return;
+        }
         Self::title(ui, "Capture");
         let (text, tone, dot) = if self.monitor.has_orphan() {
             ("ORPHAN CAPTURE", theme::Tone::Warning, false)
         } else {
             match self.monitor.state {
-                CaptureState::Idle => ("IDLE", theme::Tone::Neutral, false),
                 CaptureState::Monitoring => ("LIVE", theme::Tone::Success, true),
                 CaptureState::Releasing => ("RELEASING", theme::Tone::Warning, false),
-                CaptureState::Capturing => ("RECORDING", theme::Tone::DangerSolid, true),
+                _ => ("IDLE", theme::Tone::Neutral, false),
             }
         };
         theme::badge(ui, text, tone, dot);
-
-        let needs_refresh = self.monitor.toolbar_section(
-            ui,
-            &mut self.mpv,
-            &self.cfg,
-            &mut self.status,
-            &mut self.status_bar.confirm,
-        );
-        if needs_refresh {
-            self.upscale.refresh_library(&self.cfg);
+        if self.monitor.state == CaptureState::Monitoring {
+            ui.label(
+                egui::RichText::new("Input changes apply to the hardware as you drag")
+                    .size(11.5)
+                    .color(theme::color::TEXT_WEAK),
+            );
         }
+    }
 
-        ui.separator();
-        ui.label("Max length");
-        let capturing = self.monitor.state == CaptureState::Capturing;
-        ui.add_enabled(
-            !capturing,
-            egui::TextEdit::singleline(&mut self.monitor.max_duration)
-                .font(egui::TextStyle::Monospace)
-                .desired_width(70.0),
-        )
-        .on_disabled_hover_text(
-            "Applies to the next capture only — use \"Stop after\" to change the running one",
+    /// The red recording bar: RECORDING and the file on the left, the clock and stop time on the right.
+    fn recording_toolbar(&mut self, ui: &mut egui::Ui) {
+        let on = theme::color::ON_DANGER;
+        ui.label(egui::RichText::new(icons::CAPTURE).size(14.0).color(on));
+        ui.label(
+            egui::RichText::new("RECORDING")
+                .family(egui::FontFamily::Name(theme::FAMILY_BOLD.into()))
+                .size(13.0)
+                .color(on),
         );
+        let stop = self.monitor.stop_total_secs();
+        let elapsed = self.monitor.capture.elapsed_str();
+        let name = self.monitor.capture.file_name();
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if let Some(total) = stop {
+                ui.label(
+                    egui::RichText::new(format!("/ {}", crate::status::hms(total)))
+                        .monospace()
+                        .size(11.5)
+                        .color(on),
+                );
+            }
+            ui.label(
+                egui::RichText::new(elapsed)
+                    .family(egui::FontFamily::Name(theme::FAMILY_MONO_BOLD.into()))
+                    .size(18.0)
+                    .color(on),
+            );
+            if let Some(name) = name {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(name).monospace().size(11.5).color(on))
+                        .truncate(),
+                );
+            }
+        });
     }
 
     fn library_toolbar(&mut self, ui: &mut egui::Ui) {
@@ -514,12 +545,31 @@ impl eframe::App for App {
         }
 
         match self.view_mode {
-            // Capture: the V4L2 input controls beside the live picture.
+            // Capture: the Session block above the V4L2 input controls, beside the live picture.
             ViewMode::Monitor => {
+                let mut refresh = false;
                 let resp = egui::Panel::left("input")
                     .resizable(true)
                     .default_size(theme::size::SIDE_PANEL_WIDTH)
-                    .show(ctx, |ui| self.monitor.show_input_panel(ui));
+                    .show(ctx, |ui| {
+                        egui::ScrollArea::vertical()
+                            .show(ui, |ui| {
+                                ui.spacing_mut().item_spacing.y = 10.0;
+                                refresh = self.monitor.show_session(
+                                    ui,
+                                    &mut self.mpv,
+                                    &self.cfg,
+                                    &mut self.status,
+                                    &mut self.status_bar.confirm,
+                                );
+                                ui.separator();
+                                self.monitor.show_input_panel(ui)
+                            })
+                            .inner
+                    });
+                if refresh {
+                    self.upscale.refresh_library(&self.cfg);
+                }
                 if resp.inner {
                     self.arm_save();
                 }
