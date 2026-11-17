@@ -70,8 +70,6 @@ pub mod size {
     pub const TOOLBAR_HEIGHT: f32 = 40.0;
     pub const STATUS_BAR_HEIGHT: f32 = 36.0;
     pub const SIDE_PANEL_WIDTH: f32 = 232.0;
-    pub const SIDE_PANEL_MIN: f32 = 220.0;
-    pub const SIDE_PANEL_MAX: f32 = 320.0;
     pub const CONTROL_HEIGHT: f32 = 26.0;
     pub const PRIMARY_HEIGHT: f32 = 32.0;
     pub const NEXT_STEP_HEIGHT: f32 = 36.0;
@@ -80,9 +78,6 @@ pub mod size {
     pub const RADIUS_WINDOW: u8 = 6;
     pub const RADIUS_BADGE: u8 = 3;
     pub const RADIUS_BAR: u8 = 2;
-    /// Spacing scale. Use these, not ad hoc values.
-    pub const SPACE: [f32; 7] = [2.0, 4.0, 6.0, 8.0, 12.0, 16.0, 24.0];
-    pub const MIN_WINDOW: [f32; 2] = [944.0, 516.0];
 }
 
 /// Named font families for the weights egui cannot synthesize.
@@ -279,13 +274,6 @@ pub fn primary_button(text: impl Into<String>) -> egui::Button<'static> {
         .stroke(line(color::ACCENT))
 }
 
-/// Accent outline: one of two equal next steps (Edit Master: Viewer Encode / VDecimate).
-pub fn recommended_button(text: impl Into<String>) -> egui::Button<'static> {
-    egui::Button::new(RichText::new(text).color(color::ACCENT))
-        .fill(Color32::TRANSPARENT)
-        .stroke(line(color::ACCENT))
-}
-
 /// Red outline: Cancel…, Stop it, Move to Trash… before it is armed.
 pub fn danger_button(text: impl Into<String>) -> egui::Button<'static> {
     egui::Button::new(RichText::new(text).color(color::DANGER))
@@ -311,7 +299,6 @@ pub fn section_label(text: &str) -> RichText {
 pub enum Tone {
     Neutral,
     Accent,
-    Danger,
     DangerSolid,
     Warning,
     Success,
@@ -324,7 +311,6 @@ impl Tone {
         match self {
             Tone::Neutral => (WIDGET_IDLE, TEXT_NORMAL),
             Tone::Accent => (SELECTION, ACCENT),
-            Tone::Danger => (DANGER_DIM, DANGER),
             Tone::DangerSolid => (DANGER_FILL, Color32::WHITE),
             Tone::Warning => (WARNING_DIM, WARNING),
             Tone::Success => (SUCCESS_DIM, SUCCESS),

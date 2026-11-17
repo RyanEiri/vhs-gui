@@ -622,6 +622,11 @@ impl PipelineJob {
 
     /// Non-blocking poll: check child exit and tail the script's own log for
     /// frame progress.
+    /// The log this job writes, when it is one we started (a reattached job's log is unknown).
+    pub fn log_path(&self) -> Option<&std::path::Path> {
+        self.script_log.as_deref()
+    }
+
     pub fn poll(&mut self) {
         // Must update counts before the stop-after-segment check so we see
         // the freshly completed segment that triggered the threshold.

@@ -27,16 +27,13 @@ pub const WORKING: &str = ph::CIRCLE_NOTCH; // or egui::Spinner
 pub const TIME: &str = ph::CLOCK;
 pub const REATTACH: &str = ph::PLUGS_CONNECTED;
 pub const OPEN_LOG: &str = ph::FILE_TEXT;
-pub const RESULT: &str = ph::ARROW_RIGHT;
 
 // Files and panels
 pub const TRASH: &str = ph::TRASH; // was 🗑
 pub const REFRESH: &str = ph::ARROWS_CLOCKWISE; // was ⟳
 pub const RESET: &str = ph::ARROW_COUNTER_CLOCKWISE; // was ↺
 pub const SEARCH: &str = ph::MAGNIFYING_GLASS; // was 🔍
-pub const RENAME: &str = ph::PENCIL_SIMPLE;
 pub const LETTERBOX: &str = ph::CROP;
-pub const AUDIO: &str = ph::WAVEFORM;
 pub const VIEWER: &str = ph::EYE;
 pub const SECTION_OPEN: &str = ph::CARET_DOWN;
 pub const SECTION_CLOSED: &str = ph::CARET_RIGHT;

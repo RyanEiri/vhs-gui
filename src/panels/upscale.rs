@@ -70,6 +70,8 @@ pub struct UpscalePanel {
     upscale_started: bool,
     /// A "Set up VapourSynth" job just ended (successfully or not); the app rechecks the tools.
     vs_setup_finished: bool,
+    /// The job that just ended, for the banner or toast (`take_finished`).
+    finished: Option<crate::panels::notice::Finished>,
     last_preview_at: Option<std::time::Instant>,
     last_preview_frames: u64,
     preview_textures: Option<UpscalePreviewTextures>,
@@ -89,6 +91,7 @@ impl UpscalePanel {
             quiet_spot_scan: None,
             letterbox: Default::default(),
             vs_setup_finished: false,
+            finished: None,
             upscale_started: false,
             last_preview_at: None,
             last_preview_frames: 0,
@@ -418,6 +421,15 @@ impl UpscalePanel {
     }
 
     /// True once after a VapourSynth setup job has ended.
+    /// Select the file at `path` in the library, if it is listed.
+    pub fn select_path(&mut self, path: &std::path::Path) {
+        self.library.selected = self.library.entries.iter().position(|e| e.path == path);
+    }
+
+    pub fn take_finished(&mut self) -> Option<crate::panels::notice::Finished> {
+        self.finished.take()
+    }
+
     pub fn take_vs_setup_finished(&mut self) -> bool {
         std::mem::take(&mut self.vs_setup_finished)
     }
@@ -527,9 +539,15 @@ impl UpscalePanel {
                 self.vs_setup_finished = true;
             }
             let failed = job_failed(job.exit_ok, &job.output_path);
+            self.finished = Some(crate::panels::notice::Finished {
+                label: job.label.clone(),
+                failed,
+                output: job.output_path.clone(),
+                log: job.log_path().map(|p| p.to_path_buf()),
+            });
             let chained = self.chain_after.take();
             let finish_status = if failed {
-                format!("{} FAILED — see log", job.label)
+                format!("{} FAILED", job.label)
             } else if job.is_upscale {
                 cleanup_upscale_work_dir(&job.output_path, &job.segments_dir)
                     .map(|msg| format!("{} finished — {msg}", job.label))

@@ -1,6 +1,7 @@
 pub mod actions;
 pub mod letterbox;
 pub mod monitor;
+pub mod notice;
 pub mod status_bar;
 pub mod tools;
 pub mod upscale;
