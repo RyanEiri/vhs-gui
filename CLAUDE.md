@@ -36,8 +36,16 @@ DISPLAY=:0 ./target/debug/vhs-gui
 ## Architecture
 
 - **`src/app.rs`** — shell: owns `Config`, `MpvView`, `MonitorPanel`, `UpscalePanel`,
-  `ViewMode`, debounced settings persistence. Icon-only left rail switches between
-  Monitor and Upscale views; each has its own collapsible settings side panel.
+  `ViewMode`, debounced settings persistence. Layout (redesign phase 2): a full-width status bar
+  (`panels/status_bar.rs`), a 56 px labelled rail (Capture, Library, Upscale | Tools, Folders, About), a 40 px
+  per-view toolbar, side panels (Capture: V4L2 input; Library: file list and actions; Upscale: settings
+  behind the toolbar's Settings toggle) and the central area. The status bar is the one place that shows a
+  running capture (REC chip) or job (stage, progress, time left, Pause, Stop after seg, Cancel…) in every
+  view. `src/status.rs` holds its pure state: `Confirm` (a control armed by its first click, disarmed
+  by Escape, the safe button or 4 s; used by job Cancel, Stop Capture, Stop it via
+  `status_bar::confirm_button`) and `TimeLeft` (rate estimate over the last two minutes, shown only once
+  stable). A saved `upscale` view opens the Library unless an upscale is running (`ViewMode::at_startup`);
+  starting an upscale switches to the Upscale view.
 - **`src/pipeline.rs`** — `PipelineJob`: spawns a job (`start_native_single`, `start_native_pipe`,
   `start_native_sequence`),
   always with `.process_group(0)` so `killpg()` never reaches vhs-gui itself; tails

@@ -5,6 +5,8 @@ use crate::config::Config;
 use crate::icons;
 use crate::monitor_feed::MonitorFeed;
 use crate::mpv_view::{MpvView, Source};
+use crate::panels::status_bar::confirm_button;
+use crate::status::{Armed, Confirm};
 use crate::theme;
 use crate::v4l2::V4l2Controls;
 
@@ -46,8 +48,6 @@ pub struct MonitorPanel {
     pub capture_stop_at: Option<Instant>,
     /// V4L2 hardware controls (brightness, contrast, saturation, hue, gamma).
     pub v4l2: V4l2Controls,
-    /// Whether the "Input" settings side panel is open.
-    pub input_panel_open: bool,
 }
 
 impl MonitorPanel {
@@ -66,18 +66,28 @@ impl MonitorPanel {
             capture_stop_input: String::new(),
             capture_stop_at: None,
             v4l2: V4l2Controls::new(&cfg.v4l2_device),
-            input_panel_open: true,
         }
     }
 
     /// Draw the V4L2 hardware-control sliders inside a caller-supplied panel.
     /// Returns true if any control value changed this frame (triggers a settings save).
     pub fn show_input_panel(&mut self, ui: &mut egui::Ui) -> bool {
-        let (changed, close) = self.v4l2.show_panel(ui, true);
-        if close {
-            self.input_panel_open = false;
+        self.v4l2.show_panel(ui, false).0
+    }
+
+    /// The elapsed time of a recording, for the status bar's REC chip: this app's own capture, or
+    /// one found running from an earlier run.
+    pub fn recording_summary(&self) -> Option<String> {
+        match self.state {
+            CaptureState::Capturing => Some(self.capture.elapsed_str()),
+            CaptureState::Idle => self.orphans.first().map(|o| fmt_secs(o.age_secs)),
+            _ => None,
         }
-        changed
+    }
+
+    /// A capture from an earlier run is still recording.
+    pub fn has_orphan(&self) -> bool {
+        self.state == CaptureState::Idle && !self.orphans.is_empty()
     }
 
     /// Renders the capture-state portion of the toolbar.
@@ -88,11 +98,12 @@ impl MonitorPanel {
         mpv: &mut MpvView,
         cfg: &Config,
         status: &mut String,
+        confirm: &mut Confirm,
     ) -> bool {
         let mut needs_refresh = false;
         match self.state {
             CaptureState::Idle if !self.orphans.is_empty() => {
-                needs_refresh |= self.orphan_banner(ui, cfg, status);
+                needs_refresh |= self.orphan_banner(ui, cfg, status, confirm);
             }
             CaptureState::Idle => {
                 if ui.button("Monitor").clicked() {
@@ -130,7 +141,14 @@ impl MonitorPanel {
                     stats.time,
                     stats.bitrate,
                 ));
-                if ui.button("Stop Capture").clicked() {
+                if confirm_button(
+                    ui,
+                    confirm,
+                    Armed::StopCapture,
+                    "Stop Capture",
+                    "Confirm stop",
+                    "Keep recording",
+                ) {
                     needs_refresh = self.do_stop_capture(status);
                 }
                 ui.separator();
@@ -325,7 +343,13 @@ impl MonitorPanel {
     }
 
     /// The "a capture is already running" banner. Returns true when the library should refresh.
-    fn orphan_banner(&mut self, ui: &mut egui::Ui, cfg: &Config, status: &mut String) -> bool {
+    fn orphan_banner(
+        &mut self,
+        ui: &mut egui::Ui,
+        cfg: &Config,
+        status: &mut String,
+        confirm: &mut Confirm,
+    ) -> bool {
         let Some(orphan) = self.orphans.first().cloned() else {
             return false;
         };
@@ -357,11 +381,15 @@ impl MonitorPanel {
                 Err(e) => *status = format!("Cannot reattach: {e}"),
             }
         }
-        if ui
-            .button("Stop it")
-            .on_hover_text("Interrupt ffmpeg so the file is finalized")
-            .clicked()
-        {
+        let stop_it = confirm_button(
+            ui,
+            confirm,
+            Armed::StopOrphan,
+            "Stop it",
+            "Confirm stop",
+            "Keep recording",
+        );
+        if stop_it {
             for o in &self.orphans {
                 o.stop();
             }
